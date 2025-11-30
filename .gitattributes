@@ -1,0 +1,2 @@
+*.rs text eof=lf
+*.toml text eof=lf
