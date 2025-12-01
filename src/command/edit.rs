@@ -20,6 +20,7 @@ use crate::cmd_args::{EditOpts, Options};
 use crate::command::prompt::{Prompter, StdPrompter};
 use crate::command::editor::{default_editor_launcher, rewrite_id_line};
 use crate::database::EntryManager;
+use crate::database::types::{Entry, ServiceId};
 use super::CommandContext;
 
 ///
@@ -76,7 +77,7 @@ impl EditCommandContext {
     ///
     /// テンプレートを一時ファイルに書き出し、パスを返す
     ///
-    fn write_entry(&self, entry: &crate::database::types::Entry) -> Result<PathBuf> {
+    fn write_entry(&self, entry: &Entry) -> Result<PathBuf> {
         let content = serde_yaml_ng::to_string(entry)
             .context("エントリのYAML化に失敗しました")?;
         let path = std::env::temp_dir()
@@ -89,7 +90,7 @@ impl EditCommandContext {
 // CommandContextトレイトの実装
 impl CommandContext for EditCommandContext {
     fn exec(&self) -> Result<()> {
-        let id = crate::database::types::ServiceId::from_string(&self.target_id)
+        let id = ServiceId::from_string(&self.target_id)
             .map_err(|_| anyhow!("IDの形式が不正です: {}", self.target_id))?;
 
         let entry = self.manager.borrow_mut()
@@ -104,7 +105,7 @@ impl CommandContext for EditCommandContext {
             let content = fs::read_to_string(&path)
                 .context("編集結果の読み込みに失敗しました")?;
 
-            let entry_new: crate::database::types::Entry = match serde_yaml_ng::from_str(&content) {
+            let entry_new: Entry = match serde_yaml_ng::from_str(&content) {
                 Ok(entry) => entry,
                 Err(err) => {
                     if self.prompter.ask_retry(
@@ -131,7 +132,7 @@ impl CommandContext for EditCommandContext {
             }
 
             // 正規化して保存
-            let entry_norm = crate::database::types::Entry::new(
+            let entry_norm = Entry::new(
                 id.clone(),
                 entry_new.service(),
                 entry_new.aliases(),
@@ -151,7 +152,6 @@ impl CommandContext for EditCommandContext {
 mod tests {
     use super::*;
     use crate::command::prompt::test::QueuePrompter;
-    use crate::database::types::{Entry, ServiceId};
     use crate::database::EntryManager;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};

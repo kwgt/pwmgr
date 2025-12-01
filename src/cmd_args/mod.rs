@@ -618,6 +618,14 @@ pub(crate) struct ListOpts {
     /// 複数タグ指定時にAND条件で絞り込む（未指定時はOR）
     #[arg(long = "tag-and")]
     tag_and: bool,
+
+    /// サービス名でソートする（デフォルトはID）
+    #[arg(short = 'N', long = "sort-by-service-name")]
+    sort_by_service_name: bool,
+
+    /// ソート順を逆順にする
+    #[arg(short = 'r', long = "reverse-sort")]
+    reverse_sort: bool,
 }
 
 impl ListOpts {
@@ -636,6 +644,20 @@ impl ListOpts {
     pub(crate) fn is_tag_and(&self) -> bool {
         self.tag_and
     }
+
+    ///
+    /// サービス名でソートするか
+    ///
+    pub(crate) fn sort_by_service_name(&self) -> bool {
+        self.sort_by_service_name
+    }
+
+    ///
+    /// ソートを逆順にするか
+    ///
+    pub(crate) fn reverse_sort(&self) -> bool {
+        self.reverse_sort
+    }
 }
 
 // ShowOptionsトレイトの実装
@@ -644,6 +666,8 @@ impl ShowOptions for ListOpts {
         println!("list command options");
         println!("   target_tags:   {:?}", self.tags);
         println!("   tag_and:       {}", self.tag_and);
+        println!("   sort_by_name:  {}", self.sort_by_service_name);
+        println!("   reverse_sort:  {}", self.reverse_sort);
     }
 }
 

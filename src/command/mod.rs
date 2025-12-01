@@ -19,6 +19,7 @@ pub(crate) mod search;
 pub(crate) mod query;
 pub(crate) mod matcher;
 pub(crate) mod prompt;
+pub(crate) mod util;
 
 use anyhow::Result;
 

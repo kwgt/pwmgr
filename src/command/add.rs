@@ -22,6 +22,7 @@ use crate::database::{
 use super::{
     editor::{default_editor_launcher, rewrite_id_line, EditorLauncher},
     prompt::{Prompter, StdPrompter},
+    util::is_blank,
     CommandContext,
 };
 
@@ -135,6 +136,24 @@ impl CommandContext for AddCommandContext {
 
             // 正規化したエントリを登録
             // Entry::new() で別名・タグをソート＋重複排除して正規化してから登録する
+            if is_blank(&entry.service()) {
+                if self.prompter.ask_retry("サービス名が未入力です。再編集しますか？")? {
+                    continue;
+                } else {
+                    return Err(anyhow!("サービス名が未入力です"));
+                }
+            }
+
+            if entry.properties().is_empty() {
+                if self.prompter.ask_retry(
+                    "プロパティが1件も登録されていません。再編集しますか？"
+                )? {
+                    continue;
+                } else {
+                    return Err(anyhow!("プロパティが未登録です"));
+                }
+            }
+
             let entry = Entry::new(
                 id.clone(),
                 entry.service(),
@@ -164,7 +183,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::command::prompt::test::QueuePrompter;
@@ -192,8 +211,8 @@ mod tests {
         EntryManager::open(path).unwrap()
     }
 
-    #[test]
     /// 正常系: 編集内容が正しく登録され、別名/タグがソート+重複除去されること
+    #[test]
     fn exec_registers_normalized_entry() {
         let mgr = build_manager();
 
@@ -242,32 +261,42 @@ mod tests {
         assert_eq!(entry.properties(), props);
     }
 
-    #[test]
     /// IDを誤って変更した際にリトライして正しいIDで登録できること
+    #[test]
     fn exec_retries_on_id_change() {
         let mgr = build_manager();
         let counter = AtomicUsize::new(0);
+        let original_id = Arc::new(Mutex::new(None::<String>));
 
-        let editor = Arc::new(move |path: &Path| -> Result<()> {
-            let id = read_id_from_template(path);
-            let turn = counter.fetch_add(1, Ordering::SeqCst);
+        let editor = {
+            let original_id = Arc::clone(&original_id);
 
-            let wrong_id = ServiceId::new().to_string();
-            let use_id = if turn == 0 { wrong_id } else { id };
+            Arc::new(move |path: &Path| -> Result<()> {
+                let id_in_file = read_id_from_template(path);
+                let mut stored = original_id.lock().unwrap();
+                let base_id = stored
+                    .get_or_insert_with(|| id_in_file.clone())
+                    .clone();
 
-            let yaml = format!(
-                concat!(
-                    "id: \"{id}\"\n",
-                    "service: \"svc\"\n",
-                    "aliases: []\n",
-                    "tags: []\n",
-                    "properties: {{}}\n",
-                ),
-                id = use_id,
-            );
-            fs::write(path, yaml)?;
-            Ok(())
-        });
+                let turn = counter.fetch_add(1, Ordering::SeqCst);
+                let wrong_id = ServiceId::new().to_string();
+                let use_id = if turn == 0 { wrong_id } else { base_id };
+
+                let yaml = format!(
+                    concat!(
+                        "id: \"{id}\"\n",
+                        "service: \"svc\"\n",
+                        "aliases: []\n",
+                        "tags: []\n",
+                        "properties:\n",
+                        "  user: alice\n",
+                    ),
+                    id = use_id,
+                );
+                fs::write(path, yaml)?;
+                Ok(())
+            })
+        };
 
         let ctx = AddCommandContext::with_deps(
             mgr,
