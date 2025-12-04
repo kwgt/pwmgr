@@ -2,7 +2,7 @@
 id: "{{ID}}"
 
 # サービス名を入力してください
-service: ""
+service: "{{SERVICE}}"
 
 # サービスの別名を入力してください
 aliases: []

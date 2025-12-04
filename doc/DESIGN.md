@@ -12,12 +12,14 @@
    |   |
    |   +- matcher - Matcher列挙子定義を行うモジュール(共用モジュール)
    |   +- prompt - Promptトレイト定義を行うモジュール(共用モジュール)
+   |   +- util - その他のユーティリティ定義モジュール(共用モジュール)
    |   |
    |   +- add - addサブコマンド定義モジュール
    |   +- edit - editサブコマンド定義モジュール
    |   +- export - exportサブコマンド定義モジュール
    |   +- import - importサブコマンド定義モジュール
    |   +- list - listサブコマンド定義モジュール
+   |   +- remove - removeサブコマンド定義モジュール
    |   +- tags - tagsサブコマンド定義モジュール
    |   +- query - queryサブコマンド定義モジュール
    |   +- search - searchサブコマンド定義モジュール

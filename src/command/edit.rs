@@ -139,6 +139,9 @@ impl CommandContext for EditCommandContext {
                 entry_new.tags(),
                 entry_new.properties(),
             );
+            let mut entry_norm = entry_norm;
+            entry_norm.set_removed(entry_new.is_removed());
+            entry_norm.set_last_update_now();
 
             self.manager.borrow_mut().put(&entry_norm)?;
             break;

@@ -135,9 +135,19 @@ impl EntryManager {
         P: AsRef<Path>
     {
         let db = match Database::create(path) {
-            Ok(db) => db,
-            Err(err) => return Err(err.into()),
+            Ok(db) => {
+                // データベース作成の場合はとりあえずテーブルを作成する
+                let txn = db.begin_write()?;
+                {
+                    let _= txn.open_table(ENTRIES_TABLE)?;
+                    let _= txn.open_multimap_table(TAGS_TABLE)?;
+                }
+                txn.commit()?;
 
+                db
+            },
+
+            Err(err) => return Err(err.into()),
         };
 
         Ok(Self {db})
@@ -167,25 +177,31 @@ impl EntryManager {
              * タグテーブルを更新
              */
             if let Some(existing) = table.get(&id)? {
-                /*
-                 * 既存タグが存在する場合
-                 */
+                let existing = existing.value();
+                let was_removed = existing.is_removed();
+                let now_removed = entry.is_removed();
 
-                let a = existing.value().tags();
-                let b = entry.tags();
+                if was_removed && !now_removed {
+                    // 復活: 現在のタグを全て追加
+                    expand_tag_list(&tnx, &id, entry.tags())?;
 
-                // 既存エントリにのみに存在するタグがある場合は、そのタグに対応
-                // するタグリストからエントリのサービスIDを削除
-                if let Some(diff) = vec_diff(&a, &b) {
-                    shrink_tag_list(&tnx, &id, diff)?;
+                } else if !was_removed && now_removed {
+                    // ソフト削除: 既存タグを全て削除
+                    shrink_tag_list(&tnx, &id, existing.tags())?;
+
+                } else {
+                    // 通常の差分更新
+                    let a = existing.tags();
+                    let b = entry.tags();
+
+                    if let Some(diff) = vec_diff(&a, &b) {
+                        shrink_tag_list(&tnx, &id, diff)?;
+                    }
+
+                    if let Some(diff) = vec_diff(&b, &a) {
+                        expand_tag_list(&tnx, &id, diff)?;
+                    }
                 }
-
-                // 新規エントリにのみに存在するタグがある場合は、そのタグに対応
-                // するに対応するタグリストにエントリのサービスIDを追加
-                if let Some(diff) = vec_diff(&b, &a) {
-                    expand_tag_list(&tnx, &id, diff)?;
-                }
-
             } else {
                 /*
                  * 既存タグが存在しない場合
@@ -193,7 +209,9 @@ impl EntryManager {
 
                 // 新規エントリの持つタグに対応するタグリストにエントリのサービ
                 // スIDを追加
-                expand_tag_list(&tnx, &id, entry.tags())?;
+                if !entry.is_removed() {
+                    expand_tag_list(&tnx, &id, entry.tags())?;
+                }
             }
 
 
@@ -295,10 +313,30 @@ impl EntryManager {
             table.range(ServiceId::range_all())?
                 .into_iter()
                 .map(|res| res.map(|(id, _)| id.value()))
-                .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
-                .map_err(|err| err.into())
+            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
+            .map_err(|err| err.into())
 
         }
+    }
+
+    ///
+    /// 削除済みを除外/含めるフラグ付きで全サービスのIDのリストの取得
+    ///
+    pub(crate) fn all_service_filtered(&mut self, exclude_removed: bool) -> Result<Vec<ServiceId>> {
+        let ids = self.all_service()?;
+        if !exclude_removed {
+            return Ok(ids);
+        }
+
+        let mut filtered = Vec::new();
+        for id in ids {
+            if let Some(entry) = self.get(&id)? {
+                if !entry.is_removed() {
+                    filtered.push(id);
+                }
+            }
+        }
+        Ok(filtered)
     }
 
     ///
@@ -307,11 +345,11 @@ impl EntryManager {
     pub(crate) fn all_tags(&mut self) -> Result<Vec<(String, usize)>> {
         let mut counts: HashMap<String, usize> = HashMap::new();
 
-        for id in self.all_service()? {
-            if let Some(entry) = self.get(&id)? {
-                for tag in entry.tags() {
-                    *counts.entry(tag).or_insert(0) += 1;
-                }
+        for id in self.all_service_filtered(true)? {
+            let entry = self.get(&id)?
+                .expect("entry disappeared during tag aggregation");
+            for tag in entry.tags() {
+                *counts.entry(tag).or_insert(0) += 1;
             }
         }
 
@@ -327,7 +365,7 @@ impl EntryManager {
     /// # 返り値
     /// 取得に成功した場合はサービスIDのリストを`Ok()`でラップして返す。
     ///
-    pub(crate) fn tagged_service(&self, tag: &str)
+    pub(crate) fn tagged_service(&mut self, tag: &str)
         -> Result<Vec<ServiceId>>
     {
         /*
@@ -338,10 +376,21 @@ impl EntryManager {
         let table = tnx.open_multimap_table(TAGS_TABLE)?;
 
 
-        table.get(&tag.to_string())?
+        let ids = table.get(&tag.to_string())?
             .map(|id| id.map(|id| id.value()))
             .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
-            .map_err(|err| err.into())
+            .map_err(|err: StorageError| anyhow::Error::from(err))?;
+
+        let mut filtered = Vec::new();
+        for id in ids {
+            if let Some(entry) = self.get(&id)? {
+                if !entry.is_removed() {
+                    filtered.push(id);
+                }
+            }
+        }
+
+        Ok(filtered)
     }
 }
 

@@ -45,7 +45,7 @@ impl ExportCommandContext {
     /// 全エントリを収集する
     ///
     fn collect_entries(&self) -> Result<Vec<Entry>> {
-        let ids = self.manager.borrow().all_service()?;
+        let ids = self.manager.borrow_mut().all_service_filtered(true)?;
         let mut entries = Vec::new();
 
         for id in ids {

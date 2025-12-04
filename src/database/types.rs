@@ -13,11 +13,52 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Deref, RangeInclusive};
 
+use chrono::{DateTime, Duration, Local};
 use anyhow::{Error, Result};
 use redb::{Key, TypeName, Value};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de;
 use ulid::{DecodeError, Ulid};
+
+// ローカルモジュール: last_update の人間可読シリアライズ
+mod serde_human_datetime {
+    use chrono::{DateTime, Local};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Option<DateTime<Local>> を RFC3339 文字列でシリアライズする
+    pub(crate) fn serialize<S>(
+        val: &Option<DateTime<Local>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match val {
+            Some(dt) => serializer.serialize_str(&dt.to_rfc3339()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// RFC3339 文字列（または None）から Option<DateTime<Local>> を復元する
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Local>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt = Option::<String>::deserialize(deserializer)?;
+        match opt {
+            Some(s) => DateTime::parse_from_rfc3339(&s)
+                .map(|dt| Some(dt.with_timezone(&Local)))
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
+/// 現在時刻（ローカル）を秒精度に丸めて返す
+fn now_sec() -> DateTime<Local> {
+    let now = Local::now();
+    now - Duration::nanoseconds(now.timestamp_subsec_nanos() as i64)
+}
 
 ///
 /// サービスIDを表す構造体
@@ -197,6 +238,19 @@ pub(crate) struct Entry {
 
     /// エントリのプロパティ
     properties: BTreeMap<String, String>,
+
+    /// 最終更新日時（ローカル時間、ISO8601文字列でシリアライズ）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serde_human_datetime::serialize",
+        deserialize_with = "serde_human_datetime::deserialize"
+    )]
+    last_update: Option<DateTime<Local>>,
+
+    /// ソフトリムーブフラグ
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    removed: Option<bool>,
 }
 
 impl Entry {
@@ -232,6 +286,8 @@ impl Entry {
             aliases,
             tags,
             properties,
+            removed: None,
+            last_update: Some(now_sec()),
         }
     }
 
@@ -278,6 +334,42 @@ impl Entry {
     pub(crate) fn properties(&self) -> BTreeMap<String, String> {
         self.properties.clone()
     }
+
+    ///
+    /// ソフトリムーブフラグへのアクセサ
+    ///
+    pub(crate) fn is_removed(&self) -> bool {
+        self.removed.unwrap_or(false)
+    }
+
+    ///
+    /// 最終更新日時へのアクセサ
+    ///
+    pub(crate) fn last_update(&self) -> Option<DateTime<Local>> {
+        self.last_update
+    }
+
+    ///
+    /// 最終更新日時を現在時刻で更新
+    ///
+    pub(crate) fn set_last_update_now(&mut self) {
+        self.last_update = Some(now_sec());
+    }
+
+    ///
+    /// 最終更新日時を任意の値で設定（テスト用など）
+    ///
+    #[allow(dead_code)]
+    pub(crate) fn set_last_update(&mut self, dt: DateTime<Local>) {
+        self.last_update = Some(dt);
+    }
+
+    ///
+    /// ソフトリムーブフラグを設定
+    ///
+    pub(crate) fn set_removed(&mut self, removed: bool) {
+        self.removed = removed.then_some(true);
+    }
 }
 
 // Valueトレイトの実装
@@ -305,7 +397,7 @@ impl Value for Entry {
     where
         Self: 'b
     {
-        rmp_serde::to_vec(value)
+        rmp_serde::to_vec_named(value)
             .expect("failed to serialize to MessagePack bytes")
     }
 }

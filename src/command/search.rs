@@ -102,6 +102,9 @@ impl SearchCommandContext {
             };
 
             if let Some(entry) = entry_opt {
+                if entry.is_removed() {
+                    continue;
+                }
                 if !Self::tag_filter(&entry, &target_tags) {
                     continue;
                 }

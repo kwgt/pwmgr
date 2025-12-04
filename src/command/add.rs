@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::cmd_args::Options;
+use crate::cmd_args::{AddOpts, Options};
 use crate::database::{
     types::{Entry, ServiceId},
     EntryManager,
@@ -41,19 +41,23 @@ struct AddCommandContext {
 
     /// エディタ起動手順
     editor_launcher: Arc<EditorLauncher>,
+
+    /// デフォルトサービス名（引数で指定された場合）
+    default_service: Option<String>,
 }
 
 impl AddCommandContext {
     ///
     /// オブジェクトの生成
     ///
-    fn new(opts: &Options) -> Result<Self> {
+    fn new(opts: &Options, sub_opts: &AddOpts) -> Result<Self> {
         let editor = opts.editor();
 
         Ok(Self {
             manager: RefCell::new(opts.open()?),
             prompter: Arc::new(StdPrompter),
             editor_launcher: default_editor_launcher(editor),
+            default_service: sub_opts.service_name(),
         })
     }
 
@@ -61,7 +65,10 @@ impl AddCommandContext {
     /// テンプレートを一時ファイルに書き出し、パスを返す
     ///
     fn write_template(&self, id: &ServiceId) -> Result<PathBuf> {
-        let content = ADD_TEMPLATE.replace("{{ID}}", &id.to_string());
+        let content = ADD_TEMPLATE
+            .replace("{{ID}}", &id.to_string())
+            .replace("{{SERVICE}}", self.default_service.as_deref().unwrap_or(""));
+
         let path = std::env::temp_dir()
             .join(format!("pwmgr-add-{}.yml", id.to_string()));
         fs::write(&path, content).context("テンプレートの書き込みに失敗しました")?;
@@ -83,11 +90,13 @@ impl AddCommandContext {
         manager: EntryManager,
         prompter: Arc<dyn Prompter>,
         editor_launcher: Arc<EditorLauncher>,
+        default_service: Option<String>,
     ) -> Self {
         Self {
             manager: RefCell::new(manager),
             prompter,
             editor_launcher,
+            default_service,
         }
     }
 }
@@ -134,11 +143,11 @@ impl CommandContext for AddCommandContext {
                 }
             }
 
-            // 正規化したエントリを登録
-            // Entry::new() で別名・タグをソート＋重複排除して正規化してから登録する
-            if is_blank(&entry.service()) {
-                if self.prompter.ask_retry("サービス名が未入力です。再編集しますか？")? {
-                    continue;
+        // 正規化したエントリを登録
+        // Entry::new() で別名・タグをソート＋重複排除して正規化してから登録する
+        if is_blank(&entry.service()) {
+            if self.prompter.ask_retry("サービス名が未入力です。再編集しますか？")? {
+                continue;
                 } else {
                     return Err(anyhow!("サービス名が未入力です"));
                 }
@@ -161,6 +170,9 @@ impl CommandContext for AddCommandContext {
                 entry.tags(),
                 entry.properties(),
             );
+            // 更新日時をセット
+            let mut entry = entry;
+            entry.set_last_update_now();
 
             self.manager.borrow_mut().put(&entry)?;
             break;
@@ -173,8 +185,8 @@ impl CommandContext for AddCommandContext {
 ///
 /// コマンドコンテキストの生成
 ///
-pub(crate) fn build_context(opts: &Options) -> Result<Box<dyn CommandContext>> {
-    Ok(Box::new(AddCommandContext::new(opts)?))
+pub(crate) fn build_context(opts: &Options, sub_opts: &AddOpts) -> Result<Box<dyn CommandContext>> {
+    Ok(Box::new(AddCommandContext::new(opts, sub_opts)?))
 }
 
 #[cfg(test)]
@@ -204,6 +216,23 @@ mod tests {
             .map(|id| id.trim().trim_matches('"'))
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    /// SERVICE-NAME指定時にテンプレートへ事前入力されること
+    fn template_prefills_service_name() {
+        let mgr = build_manager();
+        let ctx = AddCommandContext::with_deps(
+            mgr,
+            Arc::new(QueuePrompter::new(vec![])),
+            Arc::new(|_| Ok(())),
+            Some("preset".to_string()),
+        );
+
+        let id = ServiceId::new();
+        let path = ctx.write_template(&id).unwrap();
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("service: \"preset\""));
     }
 
     fn build_manager() -> EntryManager {
@@ -243,6 +272,7 @@ mod tests {
             mgr,
             Arc::new(QueuePrompter::new(vec![])),
             editor,
+            None,
         );
 
         ctx.exec().unwrap();
@@ -302,6 +332,7 @@ mod tests {
             mgr,
             Arc::new(QueuePrompter::new(vec![true])),
             editor,
+            None,
         );
 
         ctx.exec().unwrap();
@@ -324,6 +355,7 @@ mod tests {
             mgr,
             Arc::new(QueuePrompter::new(vec![false])),
             editor,
+            None,
         );
 
         let result = ctx.exec();

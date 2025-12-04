@@ -10,7 +10,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::convert::From;
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -19,6 +19,38 @@ use crate::cmd_args::{QueryOpts, Options};
 use crate::database::types::{Entry, ServiceId};
 use crate::database::EntryManager;
 use super::{matcher::Matcher, CommandContext};
+
+///
+/// 表示用の簡略化エントリ
+///
+#[derive(Serialize)]
+struct SimplizedEntry {
+    /// サービスID
+    id: ServiceId,
+
+    /// サービス名
+    service: String,
+
+    /// プロパティ
+    properties: BTreeMap<String, String>,
+}
+
+impl SimplizedEntry {
+    fn to_string(&self) -> Result<String> {
+        serde_yaml_ng::to_string(self).map_err(|err| err.into())
+    }
+}
+
+// From<&Entry>の実装
+impl From<&Entry> for SimplizedEntry {
+    fn from(value: &Entry) -> Self {
+        Self {
+            id: value.id(),
+            service: value.service(),
+            properties: value.properties(),
+        }
+    }
+}
 
 ///
 /// addサブコマンドのコンテキスト情報をパックした構造体
@@ -64,6 +96,9 @@ impl QueryCommandContext {
             };
 
             if let Some(entry) = entry_opt {
+                if entry.is_removed() {
+                    continue;
+                }
                 let service_hit = matcher.is_match(&entry.service())?;
                 let alias_hit = entry.aliases()
                     .iter()
@@ -82,21 +117,7 @@ impl QueryCommandContext {
     /// テキストでエントリを出力する
     ///
     fn print_entry(entry: &Entry) -> Result<()> {
-        let mut buf = String::new();
-        writeln!(&mut buf, "id: {}", entry.id())?;
-        writeln!(&mut buf, "service: {}", entry.service())?;
-
-        let props: BTreeMap<String, String> = entry.properties();
-        writeln!(&mut buf, "properties:")?;
-        if props.is_empty() {
-            writeln!(&mut buf, "  (none)")?;
-        } else {
-            for (k, v) in props {
-                writeln!(&mut buf, "  {k}: {v}")?;
-            }
-        }
-
-        print!("{buf}");
+        print!("{}", SimplizedEntry::from(entry).to_string()?);
         Ok(())
     }
 
@@ -104,35 +125,7 @@ impl QueryCommandContext {
     /// テキストでエントリを出力する
     ///
     fn print_full_entry(entry: &Entry) -> Result<()> {
-        let mut buf = String::new();
-        writeln!(&mut buf, "id: {}", entry.id())?;
-        writeln!(&mut buf, "service: {}", entry.service())?;
-
-        let aliases = entry.aliases();
-        if aliases.is_empty() {
-            writeln!(&mut buf, "aliases: (none)")?;
-        } else {
-            writeln!(&mut buf, "aliases: {}", aliases.join(", "))?;
-        }
-
-        let tags = entry.tags();
-        if tags.is_empty() {
-            writeln!(&mut buf, "tags: (none)")?;
-        } else {
-            writeln!(&mut buf, "tags: {}", tags.join(", "))?;
-        }
-
-        let props: BTreeMap<String, String> = entry.properties();
-        writeln!(&mut buf, "properties:")?;
-        if props.is_empty() {
-            writeln!(&mut buf, "  (none)")?;
-        } else {
-            for (k, v) in props {
-                writeln!(&mut buf, "  {k}: {v}")?;
-            }
-        }
-
-        print!("{buf}");
+        print!("{}", serde_yaml_ng::to_string(entry)?);
         Ok(())
     }
 
@@ -161,7 +154,9 @@ impl CommandContext for QueryCommandContext {
         // まずはULIDとして解釈できる場合にID検索を試みる
         if let Ok(id) = ServiceId::from_string(&key) {
             if let Some(entry) = self.manager.borrow_mut().get(&id)? {
-                hits.push(entry);
+                if !entry.is_removed() {
+                    hits.push(entry);
+                }
             }
         }
 

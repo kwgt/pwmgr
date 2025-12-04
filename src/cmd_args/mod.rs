@@ -20,7 +20,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use directories::BaseDirs;
 
 use crate::command::{
-    add, edit, export, import, list, query, search, tags, CommandContext
+    add, edit, export, import, list, query, remove, search, tags, CommandContext
 };
 use crate::database::EntryManager;
 use config::Config;
@@ -45,6 +45,15 @@ static DEFAULT_EDITOR: LazyLock<&'static str> = LazyLock::new(|| {
 });
 
 /// デフォルトのデータパス
+static DEFAULT_CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+    BaseDirs::new()
+        .unwrap()
+        .config_local_dir()
+        .join(env!("CARGO_PKG_NAME"))
+        .to_path_buf()
+});
+
+/// デフォルトのデータパス
 static DEFAULT_DATA_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     BaseDirs::new()
         .unwrap()
@@ -60,7 +69,7 @@ static DEFAULT_DATA_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
 /// コンフィギュレーションファイルのパス情報
 ///
 fn default_config_path() -> PathBuf {
-    DEFAULT_DATA_PATH.join("config.toml")
+    DEFAULT_CONFIG_PATH.join("config.toml")
 }
 
 ///
@@ -308,12 +317,13 @@ impl Options {
         match &self.command {
             Some(Command::Query(opts)) => query::build_context(self, opts),
             Some(Command::Search(opts)) => search::build_context(self, opts),
-            Some(Command::Add) => add::build_context(self),
+            Some(Command::Add(opts)) => add::build_context(self, opts),
             Some(Command::Edit(opts)) => edit::build_context(self, opts),
             Some(Command::List(opts)) => list::build_context(self, opts),
             Some(Command::Tags(opts)) => tags::build_context(self, opts),
             Some(Command::Export(opts)) => export::build_context(self, opts),
             Some(Command::Import(opts)) => import::build_context(self, opts),
+            Some(Command::Remove(opts)) => remove::build_context(self, opts),
             None => Err(anyhow!("command not specified")),
         }
     }
@@ -334,7 +344,7 @@ enum Command {
 
     /// エントリの追加
     #[command(alias = "a")]
-    Add,
+    Add(AddOpts),
 
     /// 既存エントリの編集
     #[command(alias = "e")]
@@ -347,6 +357,10 @@ enum Command {
     /// タグ一覧
     #[command(alias = "t")]
     Tags(TagsOpts),
+
+    /// エントリの削除
+    #[command(alias = "r", visible_alias = "rm")]
+    Remove(RemoveOpts),
 
     /// バックアップ用YAMLの出力
     Export(ExportOpts),
@@ -373,6 +387,34 @@ trait Validate {
     /// オプション設定内容の表示
     ///
     fn validate(&mut self) -> Result<()>;
+}
+
+///
+/// サブコマンドaddのオプション
+///
+#[derive(Clone, Args, Debug)]
+pub(crate) struct AddOpts {
+    /// 事前入力するサービス名（省略可）
+    #[arg()]
+    service_name: Option<String>,
+}
+
+impl AddOpts {
+    ///
+    /// サービス名（省略可）を返す
+    ///
+    pub(crate) fn service_name(&self) -> Option<String> {
+        self.service_name.clone()
+    }
+
+    ///
+    /// テスト用インスタンス生成関数
+    ///
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn new_for_test(service_name: Option<String>) -> Self {
+        Self { service_name }
+    }
 }
 
 ///
@@ -419,10 +461,11 @@ impl QueryOpts {
         self.full
     }
 
-    #[cfg(test)]
     ///
     /// テスト用のコンストラクタ
     ///
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn new_for_test(
         full: bool,
         match_mode: MatchMode,
@@ -536,10 +579,11 @@ impl SearchOpts {
         self.key_string.clone()
     }
 
-    #[cfg(test)]
     ///
     /// テスト用のコンストラクタ
     ///
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn new_for_test(
         service: bool,
         tags: Vec<String>,
@@ -623,9 +667,17 @@ pub(crate) struct ListOpts {
     #[arg(short = 'N', long = "sort-by-service-name")]
     sort_by_service_name: bool,
 
+    /// 最終更新日時でソートする
+    #[arg(short = 'L', long = "sort-by-last-update")]
+    sort_by_last_update: bool,
+
     /// ソート順を逆順にする
     #[arg(short = 'r', long = "reverse-sort")]
     reverse_sort: bool,
+
+    /// 削除済みエントリも表示する
+    #[arg(long = "with-removed")]
+    with_removed: bool,
 }
 
 impl ListOpts {
@@ -658,6 +710,20 @@ impl ListOpts {
     pub(crate) fn reverse_sort(&self) -> bool {
         self.reverse_sort
     }
+
+    ///
+    /// 最終更新日時でソートするか
+    ///
+    pub(crate) fn sort_by_last_update(&self) -> bool {
+        self.sort_by_last_update
+    }
+
+    ///
+    /// 削除済みエントリも含めるか
+    ///
+    pub(crate) fn with_removed(&self) -> bool {
+        self.with_removed
+    }
 }
 
 // ShowOptionsトレイトの実装
@@ -668,6 +734,8 @@ impl ShowOptions for ListOpts {
         println!("   tag_and:       {}", self.tag_and);
         println!("   sort_by_name:  {}", self.sort_by_service_name);
         println!("   reverse_sort:  {}", self.reverse_sort);
+        println!("   sort_by_last: {}", self.sort_by_last_update);
+        println!("   with_removed:  {}", self.with_removed);
     }
 }
 
@@ -734,7 +802,11 @@ impl TagsOpts {
         self.key.clone()
     }
 
+    ///
+    /// テスト用のコンストラクタ
+    ///
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn new_for_test(
         number: bool,
         sort_by_number: bool,
@@ -792,10 +864,11 @@ impl ExportOpts {
         Ok(BufWriter::new(io))
     }
 
-    #[cfg(test)]
     ///
     /// テスト用のコンストラクタ
     ///
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn new_for_test(output: Option<PathBuf>) -> Self {
         Self { output }
     }
@@ -884,10 +957,11 @@ impl ImportOpts {
         self.dry_run
     }
 
-    #[cfg(test)]
     ///
     /// テスト用のコンストラクタ
     ///
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn new_for_test(
         input: Option<PathBuf>,
         merge: bool,
@@ -917,6 +991,46 @@ impl ShowOptions for ImportOpts {
         println!("   is mearge:    {}", self.is_merge());
         println!("   is overwrite: {}", self.is_overwrite());
         println!("   is dry-run: {}", self.is_dry_run());
+    }
+}
+
+
+///
+/// サブコマンドremoveのオプション
+///
+#[derive(Clone, Args, Debug)]
+pub(crate) struct RemoveOpts {
+    /// ハードリムーブフラグ
+    #[arg(long = "hard")]
+    hard: bool,
+
+    /// 削除対象のID
+    #[arg()]
+    id: String,
+}
+
+impl RemoveOpts {
+    ///
+    /// ハードリムーブか否かを表すフラグを返す
+    ///
+    pub(crate) fn is_hard(&self) -> bool {
+        self.hard
+    }
+
+    ///
+    /// 削除対象IDへのアクセサ
+    ///
+    pub(crate) fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    ///
+    /// テスト用のコンストラクタ
+    ///
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn new_for_test(id: impl Into<String>, hard: bool) -> Self {
+        Self { id: id.into(), hard }
     }
 }
 ///
