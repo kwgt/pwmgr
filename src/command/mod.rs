@@ -21,6 +21,7 @@ pub(crate) mod matcher;
 pub(crate) mod prompt;
 pub(crate) mod util;
 pub(crate) mod remove;
+pub(crate) mod sync;
 
 use anyhow::Result;
 

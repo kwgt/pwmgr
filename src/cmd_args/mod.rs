@@ -10,20 +10,22 @@
 
 mod config;
 
-use std::io::{BufReader, BufWriter};
 use std::fs::File;
-use std::path::PathBuf;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use directories::BaseDirs;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::command::{
-    add, edit, export, import, list, query, remove, search, tags, CommandContext
+    add, edit, export, import, list, query, remove, search, sync, tags, CommandContext
 };
 use crate::database::EntryManager;
-use config::Config;
+use config::{Config, ListSortMode, TagsSortMode};
 
 /// デフォルトのエディタ名
 static DEFAULT_EDITOR: LazyLock<&'static str> = LazyLock::new(|| {
@@ -228,11 +230,26 @@ impl Options {
                     }
                 }
 
-
                 if self.editor.is_none() {
                     if let Some(editor) = &config.editor() {
                         self.editor = Some(editor.clone());
                     }
+                }
+
+                // コマンド毎のオプション情報へもコンフィギュレーションの内容を
+                // 反映する。
+                let opts: Option<&mut dyn ApplyConfig> = match
+                    &mut self.command
+                {
+                    Some(Command::Query(opts)) => Some(opts),
+                    Some(Command::Search(opts)) => Some(opts),
+                    Some(Command::List(opts)) => Some(opts),
+                    Some(Command::Tags(opts)) => Some(opts),
+                    _ => None,
+                };
+
+                if let Some(opts) = opts {
+                    opts.apply_config(&config);
                 }
 
                 Ok(())
@@ -259,6 +276,8 @@ impl Options {
         if let Some(command) = &mut self.command {
             let opts: Option<&mut dyn Validate> = match command {
                 Command::Search(opts) => Some(opts),
+                Command::Import(opts) => Some(opts),
+                Command::Sync(opts) => Some(opts),
                 _ => None
             };
 
@@ -298,8 +317,11 @@ impl Options {
                 Command::Query(opts) => Some(opts),
                 Command::Search(opts) => Some(opts),
                 Command::Edit(opts) => Some(opts),
+                Command::List(opts) => Some(opts),
+                Command::Tags(opts) => Some(opts),
                 Command::Export(opts) => Some(opts),
                 Command::Import(opts) => Some(opts),
+                Command::Sync(opts) => Some(opts),
                 _ => None,
             };
 
@@ -324,6 +346,7 @@ impl Options {
             Some(Command::Export(opts)) => export::build_context(self, opts),
             Some(Command::Import(opts)) => import::build_context(self, opts),
             Some(Command::Remove(opts)) => remove::build_context(self, opts),
+            Some(Command::Sync(opts)) => sync::build_context(self, opts),
             None => Err(anyhow!("command not specified")),
         }
     }
@@ -367,6 +390,9 @@ enum Command {
 
     /// バックアップ用YAMLの取り込み
     Import(ImportOpts),
+
+    /// 他ホストとのデータベース同期
+    Sync(SyncOpts),
 }
 
 ///
@@ -387,6 +413,16 @@ trait Validate {
     /// オプション設定内容の表示
     ///
     fn validate(&mut self) -> Result<()>;
+}
+
+///
+/// apply_config()実装を要求するトレイト
+///
+trait ApplyConfig {
+    ///
+    /// オプション設定へのコンフィギュレーションの反映
+    ///
+    fn apply_config(&mut self, config: &Config);
 }
 
 ///
@@ -426,10 +462,15 @@ pub(crate) struct QueryOpts {
     #[arg(short = 'f', long = "full")]
     full: bool,
 
-    /// マッチモード（exact / contains / regex / fuzzy）
-    #[arg(short = 'm', long = "match-mode", value_enum,
-        default_value_t = MatchMode::Contains, value_name = "MODE")]
-    match_mode: MatchMode,
+    /// マッチモード
+    #[arg(
+        short = 'm',
+        long = "match-mode",
+        value_enum,
+        value_name = "MODE",
+        help = "マッチモード\n"
+    )]
+    match_mode: Option<MatchMode>,
 
     /// 検索のためのキー(サービス名/過去名/ID)
     #[arg()]
@@ -451,7 +492,7 @@ impl QueryOpts {
     /// マッチモードへのアクセサ
     ///
     pub(crate) fn match_mode(&self) -> MatchMode {
-        self.match_mode.clone()
+        self.match_mode.unwrap_or(MatchMode::Contains)
     }
 
     ///
@@ -473,9 +514,21 @@ impl QueryOpts {
     ) -> Self {
         Self {
             full,
-            match_mode,
+            match_mode: Some(match_mode),
             key: key.into(),
         }
+    }
+}
+
+// ApplyConfigトレイトの実装
+impl ApplyConfig for QueryOpts {
+    fn apply_config(&mut self, config: &Config) {
+        if self.match_mode.is_none() {
+            if let Some(mode) = config.query_match_mode() {
+                self.match_mode = Some(mode);
+            }
+        }
+
     }
 }
 
@@ -491,8 +544,9 @@ impl ShowOptions for QueryOpts {
 ///
 /// 検索キーを表す列挙型
 ///
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
 #[value(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum MatchMode {
     /// 完全一致（大文字小文字無視）
     Exact,
@@ -522,12 +576,17 @@ pub(crate) struct SearchOpts {
 
     /// 検索対象とするプロパティのリスト(複数指定可)
     #[arg(long = "property", short = 'p', value_name = "PROPERTY_NAME")]
-    properties: Vec<String>,
+    properties: Option<Vec<String>>,
 
-    /// マッチモード（exact / contains / regex / fuzzy）
-    #[arg(short = 'm', long = "match-mode", value_enum,
-        default_value_t = MatchMode::Contains, value_name = "MODE")]
-    match_mode: MatchMode,
+    /// マッチモード
+    #[arg(
+        short = 'm',
+        long = "match-mode",
+        value_enum,
+        value_name = "MODE",
+        help = "マッチモード\n"
+    )]
+    match_mode: Option<MatchMode>,
 
     /// 検索のためのキー
     #[arg()]
@@ -542,7 +601,7 @@ impl SearchOpts {
     /// サービス名を検索対象とする場合は`true`を返す。
     ///
     pub(crate) fn is_include_service(&self) -> bool {
-        self.service || self.properties.len() == 0
+         self.service || self.target_properties().is_empty()
     }
 
     ///
@@ -562,14 +621,14 @@ impl SearchOpts {
     /// 検索対象とするプロパティ名のリストをVec<String>で返す
     ///
     pub(crate) fn target_properties(&self) -> Vec<String> {
-        self.properties.clone()
+        self.properties.clone().unwrap_or_default()
     }
 
     ///
     /// マッチモードの取得
     ///
     pub(crate) fn match_mode(&self) -> MatchMode {
-        self.match_mode.clone()
+        self.match_mode.unwrap_or(MatchMode::Contains)
     }
 
     ///
@@ -594,9 +653,33 @@ impl SearchOpts {
         Self {
             service,
             tags,
-            properties,
-            match_mode,
+            properties: Some(properties),
+            match_mode: Some(match_mode),
             key_string: key.into(),
+        }
+    }
+}
+
+// Validateトレイトの実装
+impl Validate for SearchOpts {
+    fn validate(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+// ApplyConfigトレイトの実装
+impl ApplyConfig for SearchOpts {
+    fn apply_config(&mut self, config: &Config) {
+        if !self.service {
+            self.service = config.search_with_service_name().unwrap_or(false);
+        }
+
+        if self.match_mode.is_none() {
+            self.match_mode = config.search_match_mode();
+        }
+
+        if self.properties.is_none() {
+            self.properties = config.search_target_properties();
         }
     }
 }
@@ -610,13 +693,6 @@ impl ShowOptions for SearchOpts {
         println!("   target properties: {:?}", self.target_properties());
         println!("   match mode:        {:?}", self.match_mode());
         println!("   search key:        {}", self.key());
-    }
-}
-
-// Validateトレイトの実装
-impl Validate for SearchOpts {
-    fn validate(&mut self) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -705,17 +781,17 @@ impl ListOpts {
     }
 
     ///
-    /// ソートを逆順にするか
-    ///
-    pub(crate) fn reverse_sort(&self) -> bool {
-        self.reverse_sort
-    }
-
-    ///
     /// 最終更新日時でソートするか
     ///
     pub(crate) fn sort_by_last_update(&self) -> bool {
         self.sort_by_last_update
+    }
+
+    ///
+    /// ソートを逆順にするか
+    ///
+    pub(crate) fn reverse_sort(&self) -> bool {
+        self.reverse_sort
     }
 
     ///
@@ -726,16 +802,52 @@ impl ListOpts {
     }
 }
 
+// ApplyConfigトレイトの実装
+impl ApplyConfig for ListOpts {
+    fn apply_config(&mut self, config: &Config) {
+        if !self.tag_and {
+            self.tag_and = config.list_tag_and().unwrap_or(false);
+        }
+
+        if !self.reverse_sort {
+            self.reverse_sort = config.list_reverse_sort().unwrap_or(false);
+        }
+
+        if !self.with_removed {
+            self.with_removed = config.list_with_removed().unwrap_or(false);
+        }
+
+        if !(self.sort_by_service_name && self.sort_by_last_update) {
+            if let Some(mode) = config.list_sort_mode() {
+                match mode {
+                    ListSortMode::Default => {
+                        self.sort_by_service_name = false;
+                        self.sort_by_last_update = false;
+                    }
+                    ListSortMode::ServiceName => {
+                        self.sort_by_service_name = true;
+                        self.sort_by_last_update = false;
+                    }
+                    ListSortMode::LastUpdate => {
+                        self.sort_by_service_name = false;
+                        self.sort_by_last_update = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ShowOptionsトレイトの実装
 impl ShowOptions for ListOpts {
     fn show_options(&self) {
         println!("list command options");
         println!("   target_tags:   {:?}", self.tags);
-        println!("   tag_and:       {}", self.tag_and);
-        println!("   sort_by_name:  {}", self.sort_by_service_name);
-        println!("   reverse_sort:  {}", self.reverse_sort);
-        println!("   sort_by_last: {}", self.sort_by_last_update);
-        println!("   with_removed:  {}", self.with_removed);
+        println!("   tag_and:       {}", self.is_tag_and());
+        println!("   sort_by_name:  {}", self.sort_by_service_name());
+        println!("   reverse_sort:  {}", self.reverse_sort());
+        println!("   sort_by_last: {}", self.sort_by_last_update());
+        println!("   with_removed:  {}", self.with_removed());
     }
 }
 
@@ -749,17 +861,22 @@ pub(crate) struct TagsOpts {
     number: bool,
 
     /// 件数でソートするフラグ（デフォルトは降順、--reverse-sortで反転）
-    #[arg(short = 's', long = "sort-by-number")]
+    #[arg(short = 'N', long = "sort-by-number")]
     sort_by_number: bool,
 
     /// ソート結果を反転するフラグ
     #[arg(short = 'r', long = "reverse-sort")]
     reverse_sort: bool,
 
-    /// マッチモード（exact / contains / regex / fuzzy）
-    #[arg(short = 'm', long = "match-mode", value_enum,
-        default_value_t = MatchMode::Exact, value_name = "MODE")]
-    match_mode: MatchMode,
+    /// マッチモード
+    #[arg(
+        short = 'm',
+        long = "match-mode",
+        value_enum,
+        value_name = "MODE",
+        help = "マッチモード\n"
+    )]
+    match_mode: Option<MatchMode>,
 
     /// 絞り込み用のキー（省略時は全タグ）
     #[arg()]
@@ -792,7 +909,7 @@ impl TagsOpts {
     /// マッチモードを返す
     ///
     pub(crate) fn match_mode(&self) -> MatchMode {
-        self.match_mode.clone()
+        self.match_mode.unwrap_or(MatchMode::Contains)
     }
 
     ///
@@ -818,8 +935,34 @@ impl TagsOpts {
             number,
             sort_by_number,
             reverse_sort,
-            match_mode,
+            match_mode: Some(match_mode),
             key,
+        }
+    }
+}
+
+// ApplyConfigトレイトの実装
+impl ApplyConfig for TagsOpts {
+    fn apply_config(&mut self, config: &Config) {
+        if !self.number {
+            self.number = config.tags_with_number().unwrap_or(false);
+        }
+
+        if !self.reverse_sort {
+            self.reverse_sort = config.tags_reverse_sort().unwrap_or(false);
+        }
+
+        if !self.sort_by_number {
+            if let Some(mode) = config.tags_sort_mode() {
+                match mode {
+                    TagsSortMode::Default => self.sort_by_number = false,
+                    TagsSortMode::NumberOfRegist => self.sort_by_number = true,
+                }
+            }
+        }
+
+        if self.match_mode.is_none() {
+            self.match_mode = config.tags_match_mode();
         }
     }
 }
@@ -994,6 +1137,240 @@ impl ShowOptions for ImportOpts {
     }
 }
 
+///
+/// サブコマンドsyncのオプション
+///
+#[derive(Clone, Args, Debug)]
+pub(crate) struct SyncOpts {
+    /// サーバモードでの待ち受けアドレス（省略可）
+    #[arg(
+        short = 's',
+        long = "server",
+        value_name = "BIND-ADDR[:PORT]",
+        num_args = 0..=1,
+        default_missing_value = "0.0.0.0:2456",
+        conflicts_with = "client_addr"
+    )]
+    server_addr: Option<String>,
+
+    /// クライアントモードで接続するアドレス
+    #[arg(
+        short = 'c',
+        long = "client",
+        value_name = "CONNECT-ADDR[:PORT]",
+        conflicts_with = "server_addr"
+    )]
+    client_addr: Option<String>,
+}
+
+impl SyncOpts {
+    ///
+    /// アドレス文字列のバリデーション
+    ///
+    fn validate_addr(addr: &str) -> Result<()> {
+        static ADDR_RE: LazyLock<Regex> = LazyLock::new(|| {
+            // ホスト部(英数字/ドット/ハイフン/アスタリスク) + 任意のポート
+            Regex::new(r"^[A-Za-z0-9*](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?$")
+                .expect("invalid regex")
+        });
+
+        if !ADDR_RE.is_match(addr) {
+            return Err(anyhow!("invalid address format: {}", addr));
+        }
+
+        if let Some(idx) = addr.rfind(':') {
+            if idx + 1 < addr.len() {
+                let port_str = &addr[idx + 1..];
+                let port: u32 = port_str
+                    .parse()
+                    .map_err(|_| anyhow!("port must be numeric: {}", port_str))?;
+                if port == 0 || port > u16::MAX as u32 {
+                    return Err(anyhow!("port must be in 1-65535: {}", port));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    ///
+    /// 同期の動作モード
+    ///
+    pub(crate) fn mode(&self) -> Result<SyncMode> {
+        if let Some(addr) = &self.server_addr {
+            Ok(SyncMode::Server(addr.clone()))
+        } else if let Some(addr) = &self.client_addr {
+            Ok(SyncMode::Client(addr.clone()))
+        } else {
+            Err(anyhow!("either --server or --client must be specified"))
+        }
+    }
+}
+
+///
+/// syncモードを表す列挙
+///
+#[derive(Clone, Debug)]
+pub(crate) enum SyncMode {
+    /// サーバとして待ち受け
+    Server(String),
+
+    /// クライアントとして接続
+    Client(String),
+}
+
+// ShowOptionsトレイトの実装
+impl ShowOptions for SyncOpts {
+    fn show_options(&self) {
+        println!("sync command options");
+        match self.mode() {
+            Ok(SyncMode::Server(addr)) => println!("   mode: server @ {}", addr),
+            Ok(SyncMode::Client(addr)) => println!("   mode: client -> {}", addr),
+            Err(err) => println!("   mode: invalid ({})", err),
+        }
+    }
+}
+
+// Validateトレイトの実装
+impl Validate for SyncOpts {
+    fn validate(&mut self) -> Result<()> {
+        match (self.server_addr.as_ref(), self.client_addr.as_ref()) {
+            (Some(_), Some(_)) => Err(anyhow!("--server と --client は同時に指定できません")),
+            (None, None) => Err(anyhow!("--server か --client のどちらかを指定してください")),
+            (Some(addr), None) if addr.trim().is_empty() => {
+                Err(anyhow!("--server で空のアドレスは指定できません"))
+            }
+            (None, Some(addr)) if addr.trim().is_empty() => {
+                Err(anyhow!("--client で空のアドレスは指定できません"))
+            }
+            (Some(addr), None) => {
+                Self::validate_addr(addr)?;
+                Ok(())
+            }
+            (None, Some(addr)) => {
+                Self::validate_addr(addr)?;
+                Ok(())
+            }
+        }
+    }
+}
+
+// Validateトレイトの実装
+impl Validate for ImportOpts {
+    fn validate(&mut self) -> Result<()> {
+        if self.dry_run && !self.merge {
+            return Err(anyhow!("--dry-run は --merge 指定時のみ指定できます"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn config_from_toml(src: &str) -> Config {
+        toml::from_str(src).expect("toml parse failed")
+    }
+
+    #[test]
+    fn search_apply_config_fill_defaults() {
+        let cfg = config_from_toml(
+            r#"
+[search]
+with_service_name = true
+match_mode = "regex"
+target_properties = ["user", "pass"]
+"#,
+        );
+
+        let mut opts = SearchOpts {
+            service: false,
+            tags: vec![],
+            properties: None,
+            match_mode: None,
+            key_string: "dummy".into(),
+        };
+
+        opts.apply_config(&cfg);
+
+        assert!(opts.is_include_service());
+        assert_eq!(opts.match_mode(), MatchMode::Regex);
+        assert_eq!(
+            opts.target_properties(),
+            vec!["user".to_string(), "pass".to_string()]
+        );
+    }
+
+    #[test]
+    fn list_apply_config_sort_and_flags() {
+        let cfg = config_from_toml(
+            r#"
+[list]
+tag_and = true
+sort_mode = "last_update"
+reverse_sort = true
+with_removed = true
+"#,
+        );
+
+        let mut opts = ListOpts {
+            tags: vec![],
+            tag_and: false,
+            sort_by_service_name: false,
+            sort_by_last_update: false,
+            reverse_sort: false,
+            with_removed: false,
+        };
+
+        opts.apply_config(&cfg);
+
+        assert!(opts.is_tag_and());
+        assert!(!opts.sort_by_service_name());
+        assert!(opts.sort_by_last_update());
+        assert!(opts.reverse_sort());
+        assert!(opts.with_removed());
+    }
+
+    #[test]
+    fn tags_apply_config_sort_and_flags() {
+        let cfg = config_from_toml(
+            r#"
+[tags]
+with_number = true
+sort_mode = "number_of_regist"
+reverse_sort = true
+"#,
+        );
+
+        let mut opts = TagsOpts {
+            number: false,
+            sort_by_number: false,
+            reverse_sort: false,
+            match_mode: Some(MatchMode::Exact),
+            key: None,
+        };
+
+        opts.apply_config(&cfg);
+
+        assert!(opts.number());
+        assert!(opts.sort_by_number());
+        assert!(opts.reverse_sort());
+        assert_eq!(opts.match_mode(), MatchMode::Exact);
+    }
+
+    #[test]
+    fn confirm_overwrite_yes_and_no() {
+        let mut output = Vec::new();
+        let mut yes = Cursor::new(b"y\n");
+        let mut no = Cursor::new(b"n\n");
+        let path = Path::new("dummy");
+
+        assert!(confirm_overwrite_with_io(path, &mut yes, &mut output).unwrap());
+        assert!(!confirm_overwrite_with_io(path, &mut no, &mut output).unwrap());
+    }
+}
 
 ///
 /// サブコマンドremoveのオプション
@@ -1075,6 +1452,17 @@ pub(crate) fn parse() -> Result<Arc<Options>> {
             default_config_path()
         };
 
+        if path.exists() {
+            if !confirm_overwrite(&path)? {
+                println!("write default config is canceled.");
+                std::process::exit(0);
+            }
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
         Config::default().save(&path)?;
         println!("write default config to {}", path.display().to_string());
         std::process::exit(0);
@@ -1084,4 +1472,54 @@ pub(crate) fn parse() -> Result<Arc<Options>> {
      * 設定情報の返却
      */
     Ok(Arc::new(opts))
+}
+
+///
+/// config.tomlの上書き可否を標準入出力で問い合わせる
+///
+/// # 引数
+/// * `path` - 対象となるパス
+///
+/// # 戻り値
+/// 上書きを許可する場合は`true`、拒否された場合は`false`を返す。
+///
+fn confirm_overwrite(path: &Path) -> Result<bool> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+
+    confirm_overwrite_with_io(path, &mut input, &mut output)
+}
+
+///
+/// 任意の入出力を使ってconfig.tomlの上書き可否を問い合わせる
+///
+/// # 引数
+/// * `path` - 対象となるパス
+/// * `input` - 入力ストリーム（質問への回答を受け取る）
+/// * `output` - 出力ストリーム（質問を表示する）
+///
+/// # 戻り値
+/// 上書きを許可する場合は`true`、拒否された場合は`false`を返す。
+///
+fn confirm_overwrite_with_io<R, W>(path: &Path, input: &mut R, output: &mut W,)
+    -> Result<bool>
+where
+    R: BufRead,
+    W: Write,
+{
+    write!(
+        output,
+        "{} は既に存在します。上書きしますか？ [y/N]: ",
+        path.display()
+    )?;
+    output.flush()?;
+
+    let mut buf = String::new();
+    input.read_line(&mut buf)?;
+
+    let ans = buf.trim().to_lowercase();
+    Ok(ans == "y" || ans == "yes")
 }

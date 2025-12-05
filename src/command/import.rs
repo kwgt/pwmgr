@@ -46,48 +46,103 @@ impl ImportCommandContext {
     }
 
     ///
-    /// YAMLストリーミングからエントリを順次読み込む
+    /// import用にエントリを正規化する（タグ/エイリアス整形、last_update保持）
+    ///
+    fn normalize_entry(entry_raw: Entry) -> Entry {
+        let mut entry = Entry::new(
+            entry_raw.id(),
+            entry_raw.service(),
+            entry_raw.aliases(),
+            entry_raw.tags(),
+            entry_raw.properties(),
+        );
+
+        if let Some(dt) = entry_raw.last_update() {
+            entry.set_last_update(dt);
+        }
+
+        if entry_raw.is_removed() {
+            entry.set_removed(true);
+        }
+
+        entry
+    }
+
+    ///
+    /// YAMLストリーミングからエントリを順次読み込み、トランザクション内で処理する
     ///
     fn import_entries<R: Read>(&self, reader: R) -> Result<usize> {
-        let de = serde_yaml_ng::Deserializer::from_reader(reader);
-        let mut mgr = self.manager.borrow_mut();
-        let mut count = 0usize;
+        let mut deserializer = serde_yaml_ng::Deserializer::from_reader(reader);
+        let merge = self.opts.is_merge();
+        let overwrite = self.opts.is_overwrite();
+        let dry_run = self.opts.is_dry_run();
 
-        for doc in de {
-            let entry_raw = Entry::deserialize(doc)?;
-            let id = entry_raw.id();
+        // 置換モードでの削除対象リストを事前取得（読み取り）
+        let existing_ids = if !merge && !dry_run {
+            self.manager.borrow().all_service()?
+        } else {
+            Vec::new()
+        };
 
-            if !self.opts.is_overwrite() {
-                if let Some(_) = mgr.get(&id)? {
-                    return Err(anyhow!("既に存在するIDです: {}", id));
+        let mut imported = 0usize;
+
+        self.manager.borrow().with_write_transaction(|writer| {
+            // 置換モード: 先に全削除
+            if !merge && !dry_run {
+                for id in existing_ids.iter() {
+                    writer.remove(id)?;
                 }
             }
 
-            if self.opts.is_dry_run() {
-                continue;
+            for doc in deserializer.by_ref() {
+                let entry_raw = Entry::deserialize(doc)?;
+                let entry = Self::normalize_entry(entry_raw);
+                let id = entry.id();
+
+                if let Some(existing) = writer.get(&id)? {
+                    if !overwrite {
+                        return Err(anyhow!("既に存在するIDです: {}", id));
+                    }
+
+                    // 上書き時は更新日時を比較して新しい方を残す
+                    let new_is_newer = match (entry.last_update(), existing.last_update()) {
+                        (Some(new), Some(old)) => new > old,
+                        (Some(_), None) => true,
+                        _ => false,
+                    };
+
+                    if dry_run {
+                        continue;
+                    }
+
+                    if new_is_newer {
+                        eprintln!("overwrite (newer) id {}", id);
+                        writer.put(&entry)?;
+                        imported += 1;
+                    } else {
+                        eprintln!("skip overwrite: existing newer id {}", id);
+                    }
+                } else {
+                    if dry_run {
+                        continue;
+                    }
+
+                    writer.put(&entry)?;
+                    imported += 1;
+                }
             }
 
-            // 正規化して登録
-            let entry = Entry::new(
-                id.clone(),
-                entry_raw.service(),
-                entry_raw.aliases(),
-                entry_raw.tags(),
-                entry_raw.properties(),
-            );
+            Ok(())
+        })?;
 
-            mgr.put(&entry)?;
-            count += 1;
-        }
-
-        Ok(count)
+        Ok(imported)
     }
 }
 
 // CommandContextトレイトの実装
 impl CommandContext for ImportCommandContext {
     fn exec(&self) -> Result<()> {
-        // merge 未指定かつ dry-run でない場合は全削除して置き換え
+        // merge 未指定かつ dry-run でない場合は全削除して置き換え前に確認
         if !self.opts.is_merge() && !self.opts.is_dry_run() {
             let ids = self.manager.borrow().all_service()?;
             if ids.len() > 0 {
@@ -98,10 +153,6 @@ impl CommandContext for ImportCommandContext {
                 if !self.prompter.confirm(&msg, false, None)? {
                     return Err(anyhow!("インポートを中止しました"));
                 }
-            }
-
-            for id in ids {
-                self.manager.borrow_mut().remove(&id)?;
             }
         }
 
@@ -209,7 +260,7 @@ properties: {}
 
         let ctx = ImportCommandContext {
             manager: RefCell::new(mgr),
-            opts: ImportOpts::new_for_test(None, false, false, false),
+            opts: ImportOpts::new_for_test(None, true, false, false),
             prompter: Box::new(QueuePrompter::new(vec![true])),
         };
 
@@ -235,7 +286,7 @@ properties: {}
 
         let ctx = ImportCommandContext {
             manager: RefCell::new(mgr),
-            opts: ImportOpts::new_for_test(None, false, true, true),
+            opts: ImportOpts::new_for_test(None, true, true, true),
             prompter: Box::new(QueuePrompter::new(vec![true])),
         };
 

@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 
 use crate::cmd_args::{Options, ListOpts};
-use crate::database::{EntryManager, types::ServiceId};
+use crate::database::{EntryManager, EntryReader, types::ServiceId};
 use super::CommandContext;
 
 ///
@@ -62,25 +62,23 @@ impl ListCommandContext {
     ///
     /// タグフィルタに応じて対象ID集合を取得
     ///
-    fn collect_ids(&self) -> Result<Vec<ServiceId>> {
-        let mut mgr = self.manager.borrow_mut();
-
+    fn collect_ids_with_reader(&self, reader: &EntryReader) -> Result<Vec<ServiceId>> {
         // タグ指定なしなら全件
         if self.target_tags.is_empty() {
-            return mgr.all_service_filtered(!self.with_removed);
+            return reader.all_service_filtered(!self.with_removed);
         }
 
         let target_lower: Vec<String> =
             self.target_tags.iter().map(|t| t.to_lowercase()).collect();
 
         // タグテーブルを用いて対象IDを取得
-        let all_tags = mgr.all_tags()?;
+        let all_tags = reader.all_tags()?;
         let mut sets: Vec<BTreeSet<ServiceId>> = Vec::new();
 
         for (tag, _) in all_tags {
             if target_lower.iter().any(|t| t == &tag.to_lowercase()) {
                 let ids: BTreeSet<ServiceId> =
-                    mgr.tagged_service(&tag)?
+                    reader.tagged_service(&tag)?
                         .into_iter()
                         .collect();
                 sets.push(ids);
@@ -107,67 +105,80 @@ impl ListCommandContext {
 
         Ok(result.into_iter().collect())
     }
+
+    ///
+    /// タグフィルタに応じて対象ID集合を取得（読み取りトランザクション付き）
+    ///
+    #[cfg(test)]
+    fn collect_ids(&self) -> Result<Vec<ServiceId>> {
+        self.manager
+            .borrow()
+            .with_read_transaction(|reader| {
+                self.collect_ids_with_reader(reader)
+            })
+    }
 }
 
 // CommandContextトレイトの実装
 impl CommandContext for ListCommandContext {
     fn exec(&self) -> Result<()> {
-        // 対象IDを取得
-        let mut ids = self.collect_ids()?;
-        ids.sort();
+        let mgr = self.manager.borrow();
+        mgr.with_read_transaction(|reader| {
+            // 対象IDを取得
+            let mut ids = self.collect_ids_with_reader(reader)?;
+            ids.sort();
 
-        let mut mgr = self.manager.borrow_mut();
-
-        if self.sort_by_last_update {
-            let mut items = Vec::new();
-            for id in ids {
-                if let Some(entry) = mgr.get(&id)? {
-                    items.push((entry.last_update(), entry.service(), id, entry.is_removed()));
+            if self.sort_by_last_update {
+                let mut items = Vec::new();
+                for id in ids {
+                    if let Some(entry) = reader.get(&id)? {
+                        items.push((entry.last_update(), entry.service(), id, entry.is_removed()));
+                    }
+                }
+                items.sort_by(|a, b| a.0.cmp(&b.0));
+                if self.reverse_sort {
+                    items.reverse();
+                }
+                for (last, service, id, removed) in items {
+                    let stamp = last
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| "-".to_string());
+                    let prefix = if removed { "-" } else { "" };
+                    println!("{}{}\t{}\t{}", prefix, id, service, stamp);
+                }
+            } else if self.sort_by_service_name {
+                let mut items = Vec::new();
+                for id in ids {
+                    if let Some(entry) = reader.get(&id)? {
+                        items.push((entry.service(), id, entry.is_removed()));
+                    }
+                }
+                items.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+                if self.reverse_sort {
+                    items.reverse();
+                }
+                for (service, id, removed) in items {
+                    let prefix = if removed { "-" } else { "" };
+                    println!("{}{}\t{}", prefix, id, service);
+                }
+            } else {
+                if self.reverse_sort {
+                    ids.reverse();
+                }
+                for id in ids {
+                    if let Some(entry) = reader.get(&id)? {
+                        println!(
+                            "{}{}\t{}",
+                            id,
+                            if entry.is_removed() { "!" } else { "" },
+                            entry.service()
+                        );
+                    }
                 }
             }
-            items.sort_by(|a, b| a.0.cmp(&b.0));
-            if self.reverse_sort {
-                items.reverse();
-            }
-            for (last, service, id, removed) in items {
-                let stamp = last
-                    .map(|dt| dt.to_rfc3339())
-                    .unwrap_or_else(|| "-".to_string());
-                let prefix = if removed { "-" } else { "" };
-                println!("{}{}\t{}\t{}", prefix, id, service, stamp);
-            }
-        } else if self.sort_by_service_name {
-            let mut items = Vec::new();
-            for id in ids {
-                if let Some(entry) = mgr.get(&id)? {
-                    items.push((entry.service(), id, entry.is_removed()));
-                }
-            }
-            items.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-            if self.reverse_sort {
-                items.reverse();
-            }
-            for (service, id, removed) in items {
-                let prefix = if removed { "-" } else { "" };
-                println!("{}{}\t{}", prefix, id, service);
-            }
-        } else {
-            if self.reverse_sort {
-                ids.reverse();
-            }
-            for id in ids {
-                if let Some(entry) = mgr.get(&id)? {
-                    println!(
-                        "{}{}\t{}",
-                        id,
-                        if entry.is_removed() { "!" } else { "" },
-                        entry.service()
-                    );
-                }
-            }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 

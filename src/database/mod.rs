@@ -16,8 +16,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use redb::{
-    Database, MultimapTableDefinition, Range, ReadableDatabase, ReadableTable,
-    StorageError, TableDefinition, WriteTransaction
+    Database, MultimapTableDefinition, Range, ReadTransaction, ReadableDatabase,
+    ReadableTable, StorageError, TableDefinition, WriteTransaction
 };
 
 use crate::database::types::{Entry, ServiceId};
@@ -112,6 +112,201 @@ impl<'a> Iterator for ServiceIdIter<'a> {
 }
 
 ///
+/// 読み取り専用トランザクションをラップしたヘルパ
+///
+pub(crate) struct EntryReader {
+    tnx: ReadTransaction,
+}
+
+impl EntryReader {
+    ///
+    /// エントリーの取得
+    ///
+    /// # 引数
+    /// * `id` - 取得するエントリのサービスID
+    ///
+    /// # 戻り値
+    /// 取得に成功した場合はエントリ情報を`Ok()`でラップして返す。失敗した場合は
+    /// エラー情報を `Err()`でラップして返す。
+    ///
+    pub(crate) fn get(&self, id: &ServiceId) -> Result<Option<Entry>> {
+        let table = self.tnx.open_table(ENTRIES_TABLE)?;
+
+        Ok(table.get(id)?.map(|entry| entry.value()))
+    }
+
+    ///
+    /// 全サービスのIDのリストの取得
+    ///
+    pub(crate) fn all_service(&self) -> Result<Vec<ServiceId>> {
+        let table = self.tnx.open_table(ENTRIES_TABLE)?;
+
+        table.range(ServiceId::range_all())?
+            .into_iter()
+            .map(|res| res.map(|(id, _)| id.value()))
+            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
+            .map_err(|err| err.into())
+    }
+
+    ///
+    /// 削除済みを除外/含めるフラグ付きで全サービスのIDのリストの取得
+    ///
+    pub(crate) fn all_service_filtered(&self, exclude_removed: bool) -> Result<Vec<ServiceId>> {
+        let ids = self.all_service()?;
+        if !exclude_removed {
+            return Ok(ids);
+        }
+
+        let mut filtered = Vec::new();
+        for id in ids {
+            if let Some(entry) = self.get(&id)? {
+                if !entry.is_removed() {
+                    filtered.push(id);
+                }
+            }
+        }
+        Ok(filtered)
+    }
+
+    ///
+    /// タグに紐づくサービスIDの一覧を取得
+    ///
+    pub(crate) fn tagged_service(&self, tag: &str) -> Result<Vec<ServiceId>> {
+        let table = self.tnx.open_multimap_table(TAGS_TABLE)?;
+
+        let ids = table.get(&tag.to_string())?
+            .map(|id| id.map(|id| id.value()))
+            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
+            .map_err(|err: StorageError| anyhow::Error::from(err))?;
+
+        let mut filtered = Vec::new();
+        for id in ids {
+            if let Some(entry) = self.get(&id)? {
+                if !entry.is_removed() {
+                    filtered.push(id);
+                }
+            }
+        }
+
+        Ok(filtered)
+    }
+
+    ///
+    /// 全タグと件数の一覧を取得
+    ///
+    pub(crate) fn all_tags(&self) -> Result<Vec<(String, usize)>> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+
+        for id in self.all_service_filtered(true)? {
+            let entry = self.get(&id)?
+                .expect("entry disappeared during tag aggregation");
+            for tag in entry.tags() {
+                *counts.entry(tag).or_insert(0) += 1;
+            }
+        }
+
+        Ok(counts.into_iter().collect())
+    }
+}
+
+///
+/// 書き込みトランザクションをラップしたヘルパ
+///
+pub(crate) struct EntryWriter {
+    tnx: WriteTransaction,
+}
+
+impl EntryWriter {
+    ///
+    /// エントリーの取得
+    ///
+    pub(crate) fn get(&self, id: &ServiceId) -> Result<Option<Entry>> {
+        let table = self.tnx.open_table(ENTRIES_TABLE)?;
+        Ok(table.get(id)?.map(|entry| entry.value()))
+    }
+
+    ///
+    /// エントリーの書き込み
+    ///
+    pub(crate) fn put(&mut self, entry: &Entry) -> Result<()> {
+        let id = entry.id();
+        let mut table = self.tnx.open_table(ENTRIES_TABLE)?;
+
+        /*
+         * タグテーブルを更新
+         */
+        if let Some(existing) = table.get(&id)? {
+            let existing = existing.value();
+            let was_removed = existing.is_removed();
+            let now_removed = entry.is_removed();
+
+            if was_removed && !now_removed {
+                // 復活: 現在のタグを全て追加
+                expand_tag_list(&self.tnx, &id, entry.tags())?;
+
+            } else if !was_removed && now_removed {
+                // ソフト削除: 既存タグを全て削除
+                shrink_tag_list(&self.tnx, &id, existing.tags())?;
+
+            } else {
+                // 通常の差分更新
+                let a = existing.tags();
+                let b = entry.tags();
+
+                if let Some(diff) = vec_diff(&a, &b) {
+                    shrink_tag_list(&self.tnx, &id, diff)?;
+                }
+
+                if let Some(diff) = vec_diff(&b, &a) {
+                    expand_tag_list(&self.tnx, &id, diff)?;
+                }
+            }
+        } else {
+            /*
+             * 既存タグが存在しない場合
+             */
+
+            // 新規エントリの持つタグに対応するタグリストにエントリのサービ
+            // スIDを追加
+            if !entry.is_removed() {
+                expand_tag_list(&self.tnx, &id, entry.tags())?;
+            }
+        }
+
+        /*
+         * 新規エントリを登録する
+         */
+        table.insert(&id, entry)?;
+
+        Ok(())
+    }
+
+    ///
+    /// エントリーの削除
+    ///
+    pub(crate) fn remove(&mut self, id: &ServiceId) -> Result<()> {
+        let mut table = self.tnx.open_table(ENTRIES_TABLE)?;
+
+        /*
+         * タグリストを更新
+         */
+        if let Some(entry) = table.get(id)? {
+            // エントリが存在する場合はエントリの持つタグに対応するタグリス
+            // トからサービスIDを削除
+            shrink_tag_list(&self.tnx, &id, entry.value().tags())?;
+        } else {
+            // エントリが無い場合は、何も行わないのでリターン
+            return Ok(())
+        }
+
+        // エントリテーブルからエントリを削除
+        table.remove(id)?;
+
+        Ok(())
+    }
+}
+
+///
 /// エントリ操作手順を集約する構造体
 ///
 pub(crate) struct EntryManager {
@@ -164,69 +359,7 @@ impl EntryManager {
     /// ラップして返す。
     ///
     pub(crate) fn put(&mut self, entry: &Entry) -> Result<()> {
-        /*
-         * トランザクションを開始
-         */
-        let tnx = self.db.begin_write()?;
-
-        {
-            let id = entry.id();
-            let mut table = tnx.open_table(ENTRIES_TABLE)?;
-
-            /*
-             * タグテーブルを更新
-             */
-            if let Some(existing) = table.get(&id)? {
-                let existing = existing.value();
-                let was_removed = existing.is_removed();
-                let now_removed = entry.is_removed();
-
-                if was_removed && !now_removed {
-                    // 復活: 現在のタグを全て追加
-                    expand_tag_list(&tnx, &id, entry.tags())?;
-
-                } else if !was_removed && now_removed {
-                    // ソフト削除: 既存タグを全て削除
-                    shrink_tag_list(&tnx, &id, existing.tags())?;
-
-                } else {
-                    // 通常の差分更新
-                    let a = existing.tags();
-                    let b = entry.tags();
-
-                    if let Some(diff) = vec_diff(&a, &b) {
-                        shrink_tag_list(&tnx, &id, diff)?;
-                    }
-
-                    if let Some(diff) = vec_diff(&b, &a) {
-                        expand_tag_list(&tnx, &id, diff)?;
-                    }
-                }
-            } else {
-                /*
-                 * 既存タグが存在しない場合
-                 */
-
-                // 新規エントリの持つタグに対応するタグリストにエントリのサービ
-                // スIDを追加
-                if !entry.is_removed() {
-                    expand_tag_list(&tnx, &id, entry.tags())?;
-                }
-            }
-
-
-            /*
-             * 新規エントリを登録する
-             */
-            table.insert(&id, entry)?;
-        }
-
-        /*
-         * トランザクションをコミット
-         */
-        tnx.commit()?;
-
-        Ok(())
+        self.with_write_transaction(|writer| writer.put(entry))
     }
 
     ///
@@ -240,16 +373,7 @@ impl EntryManager {
     /// エラー情報を `Err()`でラップして返す。
     ///
     pub(crate) fn get(&mut self, id: &ServiceId) -> Result<Option<Entry>> {
-        /*
-         * トランザクションを開始
-         */
-        let tnx = self.db.begin_read()?;
-
-        {
-            let table = tnx.open_table(ENTRIES_TABLE)?;
-
-            Ok(table.get(id)?.map(|entry| entry.value()))
-        }
+        self.with_read_transaction(|reader| reader.get(id))
     }
 
     ///
@@ -263,36 +387,7 @@ impl EntryManager {
     /// プして返す。
     ///
     pub(crate) fn remove(&mut self, id: &ServiceId) -> Result<()> {
-        /*
-         * トランザクションを開始
-         */
-        let tnx = self.db.begin_write()?;
-
-        {
-            let mut table = tnx.open_table(ENTRIES_TABLE)?;
-
-            /*
-             * タグリストを更新
-             */
-            if let Some(entry) = table.get(id)? {
-                // エントリが存在する場合はエントリの持つタグに対応するタグリス
-                // トからサービスIDを削除
-                shrink_tag_list(&tnx, &id, entry.value().tags())?;
-            } else {
-                // エントリが無い場合は、何も行わないのでリターン
-                return Ok(())
-            }
-
-            // エントリテーブルからエントリを削除
-            table.remove(id)?;
-        }
-
-        /*
-         * トランザクションをコミット
-         */
-        tnx.commit()?;
-
-        Ok(())
+        self.with_write_transaction(|writer| writer.remove(id))
     }
 
     ///
@@ -302,58 +397,23 @@ impl EntryManager {
     /// 取得に成功した場合はサービスIDのリストを`Ok()`でラップして返す。
     ///
     pub(crate) fn all_service(&self) -> Result<Vec<ServiceId>> {
-        /*
-         * トランザクションを開始
-         */
-        let tnx = self.db.begin_read()?;
-
-        {
-            let table = tnx.open_table(ENTRIES_TABLE)?;
-
-            table.range(ServiceId::range_all())?
-                .into_iter()
-                .map(|res| res.map(|(id, _)| id.value()))
-            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
-            .map_err(|err| err.into())
-
-        }
+        self.with_read_transaction(|reader| reader.all_service())
     }
 
     ///
     /// 削除済みを除外/含めるフラグ付きで全サービスのIDのリストの取得
     ///
+    #[allow(dead_code)]
     pub(crate) fn all_service_filtered(&mut self, exclude_removed: bool) -> Result<Vec<ServiceId>> {
-        let ids = self.all_service()?;
-        if !exclude_removed {
-            return Ok(ids);
-        }
-
-        let mut filtered = Vec::new();
-        for id in ids {
-            if let Some(entry) = self.get(&id)? {
-                if !entry.is_removed() {
-                    filtered.push(id);
-                }
-            }
-        }
-        Ok(filtered)
+        self.with_read_transaction(|reader| reader.all_service_filtered(exclude_removed))
     }
 
     ///
     /// 全タグと件数の一覧を取得
     ///
+    #[allow(dead_code)]
     pub(crate) fn all_tags(&mut self) -> Result<Vec<(String, usize)>> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-
-        for id in self.all_service_filtered(true)? {
-            let entry = self.get(&id)?
-                .expect("entry disappeared during tag aggregation");
-            for tag in entry.tags() {
-                *counts.entry(tag).or_insert(0) += 1;
-            }
-        }
-
-        Ok(counts.into_iter().collect())
+        self.with_read_transaction(|reader| reader.all_tags())
     }
 
     ///
@@ -365,32 +425,42 @@ impl EntryManager {
     /// # 返り値
     /// 取得に成功した場合はサービスIDのリストを`Ok()`でラップして返す。
     ///
+    #[allow(dead_code)]
     pub(crate) fn tagged_service(&mut self, tag: &str)
         -> Result<Vec<ServiceId>>
     {
-        /*
-         * トランザクションの開始
-         */
+        self.with_read_transaction(|reader| reader.tagged_service(tag))
+    }
+
+    ///
+    /// 読み取り専用トランザクションの開始とクロージャ実行
+    ///
+    pub(crate) fn with_read_transaction<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&EntryReader) -> Result<T>,
+    {
         let tnx = self.db.begin_read()?;
+        let reader = EntryReader { tnx };
+        f(&reader)
+    }
 
-        let table = tnx.open_multimap_table(TAGS_TABLE)?;
+    ///
+    /// 書き込みトランザクションの開始とクロージャ実行
+    ///
+    pub(crate) fn with_write_transaction<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut EntryWriter) -> Result<T>,
+    {
+        let tnx = self.db.begin_write()?;
+        let mut writer = EntryWriter { tnx };
 
-
-        let ids = table.get(&tag.to_string())?
-            .map(|id| id.map(|id| id.value()))
-            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
-            .map_err(|err: StorageError| anyhow::Error::from(err))?;
-
-        let mut filtered = Vec::new();
-        for id in ids {
-            if let Some(entry) = self.get(&id)? {
-                if !entry.is_removed() {
-                    filtered.push(id);
-                }
+        match f(&mut writer) {
+            Ok(val) => {
+                writer.tnx.commit()?;
+                Ok(val)
             }
+            Err(err) => Err(err),
         }
-
-        Ok(filtered)
     }
 }
 

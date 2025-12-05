@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 use crate::cmd_args::{SearchOpts, Options};
 use crate::command::matcher::Matcher;
 use crate::database::types::Entry;
-use crate::database::EntryManager;
+use crate::database::{EntryManager, EntryReader};
 use super::CommandContext;
 
 ///
@@ -83,28 +83,21 @@ impl SearchCommandContext {
     ///
     /// ヒット一覧を収集する
     ///
-    fn collect_hits(&self, matcher: &Matcher) -> Result<Vec<Entry>> {
+    fn collect_hits_with_reader(
+        &self,
+        matcher: &Matcher,
+        reader: &EntryReader,
+    ) -> Result<Vec<Entry>> {
         let include_service = self.opts.is_include_service();
         let target_props = self.opts.target_properties();
         let target_tags = self.opts.target_tags();
 
-        let ids = {
-            let mgr = self.manager.borrow();
-            mgr.all_service()?
-        };
+        let ids = reader.all_service_filtered(true)?;
 
         let mut hits = Vec::new();
 
         for id in ids {
-            let entry_opt = {
-                let mut mgr = self.manager.borrow_mut();
-                mgr.get(&id)?
-            };
-
-            if let Some(entry) = entry_opt {
-                if entry.is_removed() {
-                    continue;
-                }
+            if let Some(entry) = reader.get(&id)? {
                 if !Self::tag_filter(&entry, &target_tags) {
                     continue;
                 }
@@ -125,6 +118,17 @@ impl SearchCommandContext {
         }
 
         Ok(hits)
+    }
+
+    ///
+    /// ヒット一覧を収集する（トランザクションラッパ）
+    ///
+    fn collect_hits(&self, matcher: &Matcher) -> Result<Vec<Entry>> {
+        self.manager
+            .borrow()
+            .with_read_transaction(|reader| {
+                self.collect_hits_with_reader(matcher, reader)
+            })
     }
 
     ///

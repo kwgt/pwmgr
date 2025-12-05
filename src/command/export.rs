@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::cmd_args::{ExportOpts, Options};
 use crate::database::types::Entry;
-use crate::database::EntryManager;
+use crate::database::{EntryManager, EntryReader};
 use super::CommandContext;
 
 ///
@@ -44,17 +44,28 @@ impl ExportCommandContext {
     ///
     /// 全エントリを収集する
     ///
-    fn collect_entries(&self) -> Result<Vec<Entry>> {
-        let ids = self.manager.borrow_mut().all_service_filtered(true)?;
+    fn collect_entries_with_reader(&self, reader: &EntryReader) -> Result<Vec<Entry>> {
+        let ids = reader.all_service_filtered(true)?;
         let mut entries = Vec::new();
 
         for id in ids {
-            if let Some(entry) = self.manager.borrow_mut().get(&id)? {
+            if let Some(entry) = reader.get(&id)? {
                 entries.push(entry);
             }
         }
 
         Ok(entries)
+    }
+
+    ///
+    /// 全エントリを収集する（トランザクションラッパ）
+    ///
+    fn collect_entries(&self) -> Result<Vec<Entry>> {
+        self.manager
+            .borrow()
+            .with_read_transaction(|reader| {
+                self.collect_entries_with_reader(reader)
+            })
     }
 }
 
