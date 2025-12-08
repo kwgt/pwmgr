@@ -17,7 +17,8 @@ use std::path::Path;
 use anyhow::Result;
 use redb::{
     Database, MultimapTableDefinition, Range, ReadTransaction, ReadableDatabase,
-    ReadableTable, StorageError, TableDefinition, WriteTransaction
+    ReadableTable, ReadableMultimapTable, StorageError, TableDefinition,
+    WriteTransaction
 };
 
 use crate::database::types::{Entry, ServiceId};
@@ -111,14 +112,7 @@ impl<'a> Iterator for ServiceIdIter<'a> {
     }
 }
 
-///
-/// 読み取り専用トランザクションをラップしたヘルパ
-///
-pub(crate) struct EntryReader {
-    tnx: ReadTransaction,
-}
-
-impl EntryReader {
+pub(crate) trait TransactionReadable {
     ///
     /// エントリーの取得
     ///
@@ -129,29 +123,44 @@ impl EntryReader {
     /// 取得に成功した場合はエントリ情報を`Ok()`でラップして返す。失敗した場合は
     /// エラー情報を `Err()`でラップして返す。
     ///
-    pub(crate) fn get(&self, id: &ServiceId) -> Result<Option<Entry>> {
-        let table = self.tnx.open_table(ENTRIES_TABLE)?;
-
-        Ok(table.get(id)?.map(|entry| entry.value()))
-    }
+    /// # 注記
+    /// 継承先で実装を行うこと。
+    ///
+    fn get(&self, id: &ServiceId) -> Result<Option<Entry>>;
 
     ///
-    /// 全サービスのIDのリストの取得
+    /// 登録済み全サービスIDの取得
     ///
-    pub(crate) fn all_service(&self) -> Result<Vec<ServiceId>> {
-        let table = self.tnx.open_table(ENTRIES_TABLE)?;
+    /// # 戻り値
+    /// 取得に成功した場合はレンジオブジェクトを`Ok()`でラップして返す。失敗した
+    /// 場合はエラー情報を `Err()`でラップして返す。
+    ///
+    /// # 注記
+    /// 継承先で実装を行うこと。
+    ///
+    fn all_service(&self) -> Result<Vec<ServiceId>>;
 
-        table.range(ServiceId::range_all())?
-            .into_iter()
-            .map(|res| res.map(|(id, _)| id.value()))
-            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
-            .map_err(|err| err.into())
-    }
+    ///
+    /// タグに紐づくサービスIDの一覧を取得
+    ///
+    /// # 引数
+    /// * `id` - 取得するエントリのサービスID
+    ///
+    /// # 戻り値
+    /// 取得に成功した場合はエントリ情報を`Ok()`でラップして返す。失敗した場合は
+    /// エラー情報を `Err()`でラップして返す。
+    ///
+    /// # 注記
+    /// 継承先で実装を行うこと。
+    ///
+    fn tagged_services(&self, id: &str) -> Result<Vec<ServiceId>>;
 
     ///
     /// 削除済みを除外/含めるフラグ付きで全サービスのIDのリストの取得
     ///
-    pub(crate) fn all_service_filtered(&self, exclude_removed: bool) -> Result<Vec<ServiceId>> {
+    fn all_service_filtered(&self, exclude_removed: bool)
+        -> Result<Vec<ServiceId>>
+    {
         let ids = self.all_service()?;
         if !exclude_removed {
             return Ok(ids);
@@ -169,32 +178,9 @@ impl EntryReader {
     }
 
     ///
-    /// タグに紐づくサービスIDの一覧を取得
-    ///
-    pub(crate) fn tagged_service(&self, tag: &str) -> Result<Vec<ServiceId>> {
-        let table = self.tnx.open_multimap_table(TAGS_TABLE)?;
-
-        let ids = table.get(&tag.to_string())?
-            .map(|id| id.map(|id| id.value()))
-            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()
-            .map_err(|err: StorageError| anyhow::Error::from(err))?;
-
-        let mut filtered = Vec::new();
-        for id in ids {
-            if let Some(entry) = self.get(&id)? {
-                if !entry.is_removed() {
-                    filtered.push(id);
-                }
-            }
-        }
-
-        Ok(filtered)
-    }
-
-    ///
     /// 全タグと件数の一覧を取得
     ///
-    pub(crate) fn all_tags(&self) -> Result<Vec<(String, usize)>> {
+    fn all_tags(&self) -> Result<Vec<(String, usize)>> {
         let mut counts: HashMap<String, usize> = HashMap::new();
 
         for id in self.all_service_filtered(true)? {
@@ -210,21 +196,46 @@ impl EntryReader {
 }
 
 ///
+/// 読み取り専用トランザクションをラップしたヘルパ
+///
+pub(crate) struct TransactionReader {
+    tnx: ReadTransaction,
+}
+
+// TransactionReadableの実装
+impl TransactionReadable for TransactionReader {
+    fn get(&self, id: &ServiceId) -> Result<Option<Entry>> {
+        Ok(self.tnx.open_table(ENTRIES_TABLE)?
+            .get(id)?
+            .map(|entry| entry.value())
+        )
+    }
+
+    fn all_service(&self) -> Result<Vec<ServiceId>> {
+        Ok(self.tnx.open_table(ENTRIES_TABLE)?
+            .range(ServiceId::range_all())?
+            .map(|res| res.map(|(id, _)| id.value()))
+            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()?
+        )
+    }
+ 
+    fn tagged_services(&self, tag: &str) -> Result<Vec<ServiceId>> {
+        Ok(self.tnx.open_multimap_table(TAGS_TABLE)?
+            .get(tag.to_string())?
+            .map(|id| id.map(|id| id.value()))
+            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()?
+        )
+    }
+}
+
+///
 /// 書き込みトランザクションをラップしたヘルパ
 ///
-pub(crate) struct EntryWriter {
+pub(crate) struct TransactionWriter {
     tnx: WriteTransaction,
 }
 
-impl EntryWriter {
-    ///
-    /// エントリーの取得
-    ///
-    pub(crate) fn get(&self, id: &ServiceId) -> Result<Option<Entry>> {
-        let table = self.tnx.open_table(ENTRIES_TABLE)?;
-        Ok(table.get(id)?.map(|entry| entry.value()))
-    }
-
+impl TransactionWriter {
     ///
     /// エントリーの書き込み
     ///
@@ -303,6 +314,32 @@ impl EntryWriter {
         table.remove(id)?;
 
         Ok(())
+    }
+}
+
+// TransactionReadableの実装
+impl TransactionReadable for TransactionWriter {
+    fn get(&self, id: &ServiceId) -> Result<Option<Entry>> {
+        Ok(self.tnx.open_table(ENTRIES_TABLE)?
+            .get(id)?
+            .map(|entry| entry.value())
+        )
+    }
+
+    fn all_service(&self) -> Result<Vec<ServiceId>> {
+        Ok(self.tnx.open_table(ENTRIES_TABLE)?
+            .range(ServiceId::range_all())?
+            .map(|res| res.map(|(id, _)| id.value()))
+            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()?
+        )
+    }
+
+    fn tagged_services(&self, tag: &str) -> Result<Vec<ServiceId>> {
+        Ok(self.tnx.open_multimap_table(TAGS_TABLE)?
+            .get(tag.to_string())?
+            .map(|id| id.map(|id| id.value()))
+            .collect::<redb::Result<Vec<ServiceId>, StorageError>>()?
+        )
     }
 }
 
@@ -404,8 +441,12 @@ impl EntryManager {
     /// 削除済みを除外/含めるフラグ付きで全サービスのIDのリストの取得
     ///
     #[allow(dead_code)]
-    pub(crate) fn all_service_filtered(&mut self, exclude_removed: bool) -> Result<Vec<ServiceId>> {
-        self.with_read_transaction(|reader| reader.all_service_filtered(exclude_removed))
+    pub(crate) fn all_service_filtered(&mut self, exclude_removed: bool)
+        -> Result<Vec<ServiceId>>
+    {
+        self.with_read_transaction(|reader| {
+            reader.all_service_filtered(exclude_removed)
+        })
     }
 
     ///
@@ -426,10 +467,10 @@ impl EntryManager {
     /// 取得に成功した場合はサービスIDのリストを`Ok()`でラップして返す。
     ///
     #[allow(dead_code)]
-    pub(crate) fn tagged_service(&mut self, tag: &str)
+    pub(crate) fn tagged_services(&mut self, tag: &str)
         -> Result<Vec<ServiceId>>
     {
-        self.with_read_transaction(|reader| reader.tagged_service(tag))
+        self.with_read_transaction(|reader| reader.tagged_services(tag))
     }
 
     ///
@@ -437,10 +478,10 @@ impl EntryManager {
     ///
     pub(crate) fn with_read_transaction<F, T>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&EntryReader) -> Result<T>,
+        F: FnOnce(&TransactionReader) -> Result<T>,
     {
         let tnx = self.db.begin_read()?;
-        let reader = EntryReader { tnx };
+        let reader = TransactionReader { tnx };
         f(&reader)
     }
 
@@ -449,10 +490,10 @@ impl EntryManager {
     ///
     pub(crate) fn with_write_transaction<F, T>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&mut EntryWriter) -> Result<T>,
+        F: FnOnce(&mut TransactionWriter) -> Result<T>,
     {
         let tnx = self.db.begin_write()?;
-        let mut writer = EntryWriter { tnx };
+        let mut writer = TransactionWriter { tnx };
 
         match f(&mut writer) {
             Ok(val) => {
@@ -483,7 +524,12 @@ mod tests {
     ///
     /// 簡易エントリ生成ヘルパ
     ///
-    fn make_entry(id: ServiceId, service: &str, aliases: &[&str], tags: &[&str]) -> Entry {
+    fn make_entry(id: ServiceId,
+        service: &str,
+        aliases: &[&str],
+        tags: &[&str]
+    ) -> Entry
+    {
         Entry::new(
             id,
             service.to_string(),
@@ -508,7 +554,7 @@ mod tests {
         let got = mgr.get(&id).unwrap().unwrap();
         assert_eq!(got.service(), "svc1".to_string());
 
-        let mut tagged = mgr.tagged_service("tag1").unwrap();
+        let mut tagged = mgr.tagged_services("tag1").unwrap();
         tagged.sort();
         assert_eq!(tagged, vec![id.clone()]);
     }
@@ -529,9 +575,9 @@ mod tests {
         mgr.put(&entry2).unwrap();
 
         // 旧タグ(tag1)からは消え、新タグ(tag3)に追加されていること
-        assert!(!mgr.tagged_service("tag1").unwrap().contains(&id));
-        assert!(mgr.tagged_service("tag2").unwrap().contains(&id));
-        assert!(mgr.tagged_service("tag3").unwrap().contains(&id));
+        assert!(!mgr.tagged_services("tag1").unwrap().contains(&id));
+        assert!(mgr.tagged_services("tag2").unwrap().contains(&id));
+        assert!(mgr.tagged_services("tag3").unwrap().contains(&id));
     }
 
     ///
@@ -548,7 +594,7 @@ mod tests {
         mgr.remove(&id).unwrap();
 
         assert!(mgr.get(&id).unwrap().is_none());
-        assert!(!mgr.tagged_service("tag1").unwrap().contains(&id));
+        assert!(!mgr.tagged_services("tag1").unwrap().contains(&id));
     }
 
     ///

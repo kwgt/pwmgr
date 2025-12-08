@@ -95,7 +95,9 @@ impl CommandContext for EditCommandContext {
 
         let entry = self.manager.borrow_mut()
             .get(&id)?
-            .ok_or_else(|| anyhow!("指定されたIDのエントリが見つかりません: {}", id))?;
+            .ok_or_else(|| {
+                anyhow!("指定されたIDのエントリが見つかりません: {}", id)
+            })?;
 
         let path = self.write_entry(&entry)?;
 
@@ -224,7 +226,11 @@ mod tests {
         let entry = mgr.get(&id).unwrap().unwrap();
 
         // aliases/tags は Entry::new で正規化される
-        assert_eq!(entry.aliases(), vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(
+            entry.aliases(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+
         assert_eq!(entry.tags(), vec!["t1".to_string(), "t2".to_string()]);
         assert_eq!(entry.properties().get("user").unwrap(), "alice2");
     }

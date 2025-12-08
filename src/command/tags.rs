@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::cmd_args::{Options, TagsOpts};
 use crate::command::matcher::Matcher;
-use crate::database::{EntryManager, EntryReader};
+use crate::database::{EntryManager, TransactionReadable, TransactionReader};
 use super::CommandContext;
 
 #[derive(Serialize, Clone)]
@@ -47,9 +47,10 @@ impl TagsCommandContext {
     ///
     /// 全タグの一覧を収集
     ///
-    fn collect_tags_with_reader(&self, reader: &EntryReader) -> Result<Vec<TagInfo>> {
-        let list = reader.all_tags()?;
-        Ok(list
+    fn collect_tags_with_reader(&self, reader: &TransactionReader)
+        -> Result<Vec<TagInfo>>
+    {
+        Ok(reader.all_tags()?
             .into_iter()
             .map(|(tag, count)| TagInfo { tag, count })
             .collect())

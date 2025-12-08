@@ -14,7 +14,8 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 
 use crate::cmd_args::{Options, ListOpts};
-use crate::database::{EntryManager, EntryReader, types::ServiceId};
+use crate::database::{EntryManager, TransactionReader, TransactionReadable};
+use crate::database::types::ServiceId;
 use super::CommandContext;
 
 ///
@@ -62,7 +63,9 @@ impl ListCommandContext {
     ///
     /// タグフィルタに応じて対象ID集合を取得
     ///
-    fn collect_ids_with_reader(&self, reader: &EntryReader) -> Result<Vec<ServiceId>> {
+    fn collect_ids_with_reader(&self, reader: &TransactionReader)
+        -> Result<Vec<ServiceId>>
+    {
         // タグ指定なしなら全件
         if self.target_tags.is_empty() {
             return reader.all_service_filtered(!self.with_removed);
@@ -78,7 +81,7 @@ impl ListCommandContext {
         for (tag, _) in all_tags {
             if target_lower.iter().any(|t| t == &tag.to_lowercase()) {
                 let ids: BTreeSet<ServiceId> =
-                    reader.tagged_service(&tag)?
+                    reader.tagged_services(&tag)?
                         .into_iter()
                         .collect();
                 sets.push(ids);
@@ -132,7 +135,12 @@ impl CommandContext for ListCommandContext {
                 let mut items = Vec::new();
                 for id in ids {
                     if let Some(entry) = reader.get(&id)? {
-                        items.push((entry.last_update(), entry.service(), id, entry.is_removed()));
+                        items.push((
+                            entry.last_update(),
+                            entry.service(),
+                            id,
+                            entry.is_removed()
+                        ));
                     }
                 }
                 items.sort_by(|a, b| a.0.cmp(&b.0));
@@ -153,7 +161,11 @@ impl CommandContext for ListCommandContext {
                         items.push((entry.service(), id, entry.is_removed()));
                     }
                 }
-                items.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+                items.sort_by(|a, b| {
+                    a.0.to_lowercase().cmp(&b.0.to_lowercase())
+                });
+
                 if self.reverse_sort {
                     items.reverse();
                 }

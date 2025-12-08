@@ -6,7 +6,6 @@
 
 //! サーバ側の同期処理
 
-use std::cell::RefCell;
 use std::net::TcpListener;
 
 use anyhow::{anyhow, Context, Result};
@@ -14,17 +13,18 @@ use anyhow::{anyhow, Context, Result};
 use crate::command::sync::{
     recv_packet, send_packet, NodeRole, SyncPacket, PROTOCOL_VERSION,
 };
-use crate::database::EntryManager;
+use crate::database::{TransactionReadable, TransactionWriter};
 
 /*
  * サーバモードのエントリーポイント
  */
-pub(super) fn run(addr: &str, manager: &RefCell<EntryManager>) -> Result<()> {
+pub(super) fn run(addr: &str, writer: &mut TransactionWriter) -> Result<()> {
     /*
      * クライアントの接続待ち受け
      */
     let listener = TcpListener::bind(addr)
         .with_context(|| format!("bind {}", addr))?;
+
     let (mut stream, peer) = listener.accept().context("accept")?;
     eprintln!("client connected: {}", peer);
 
@@ -68,14 +68,11 @@ pub(super) fn run(addr: &str, manager: &RefCell<EntryManager>) -> Result<()> {
     /*
      * エントリ送信フェーズ（全件送信し、エントリごとにACKを受信）
      */
-    let ids = manager.borrow().all_service()?;
+    let ids = writer.all_service()?;
     let mut sent = 0u64;
     for id in ids {
-        let entry = {
-            let mut mgr = manager.borrow_mut();
-            mgr.get(&id)?
-                .ok_or_else(|| anyhow!("missing entry during send"))?
-        };
+        let entry = writer.get(&id)?
+            .ok_or_else(|| anyhow!("missing entry during send"))?;
 
         send_packet(&mut stream, SyncPacket::server_entry(entry))?;
         sent += 1;
@@ -110,16 +107,10 @@ pub(super) fn run(addr: &str, manager: &RefCell<EntryManager>) -> Result<()> {
     loop {
         match recv_packet(&mut stream)? {
             SyncPacket::ClientEntry(entry) => {
-                let entry_id = entry.id().to_string();
-                let res = {
-                    let mut mgr = manager.borrow_mut();
-                    mgr.put(&entry)
-                };
-
-                match res {
+                match writer.put(&entry) {
                     Ok(_) => {
                         send_packet(&mut stream,  SyncPacket::entry_ack(
-                            entry_id,
+                            entry.id(),
                             true,
                             None
                         ))?;
@@ -127,7 +118,7 @@ pub(super) fn run(addr: &str, manager: &RefCell<EntryManager>) -> Result<()> {
 
                     Err(err) => {
                         send_packet(&mut stream, SyncPacket::entry_ack(
-                            entry_id,
+                            entry.id(),
                             false,
                             Some(err.to_string()),
                         ))?;
@@ -165,5 +156,9 @@ pub(super) fn run(addr: &str, manager: &RefCell<EntryManager>) -> Result<()> {
      * 正常終了通知
      */
     send_packet(&mut stream, SyncPacket::finished())?;
+
+    /*
+     * 終了
+     */
     Ok(())
 }

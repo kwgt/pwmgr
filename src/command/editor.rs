@@ -23,7 +23,9 @@ pub(crate) fn default_editor_launcher(editor: String) -> Arc<EditorLauncher> {
         let status = Command::new(&editor)
             .arg(path)
             .status()
-            .with_context(|| format!("エディタ {} の起動に失敗しました", editor))?;
+            .with_context(|| {
+                format!("エディタ {} の起動に失敗しました", editor)
+            })?;
 
         if !status.success() {
             return Err(anyhow!("エディタが異常終了しました (exit={})", status));

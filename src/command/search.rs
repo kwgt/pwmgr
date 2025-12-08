@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 use crate::cmd_args::{SearchOpts, Options};
 use crate::command::matcher::Matcher;
 use crate::database::types::Entry;
-use crate::database::{EntryManager, EntryReader};
+use crate::database::{EntryManager, TransactionReader, TransactionReadable};
 use super::CommandContext;
 
 ///
@@ -86,7 +86,7 @@ impl SearchCommandContext {
     fn collect_hits_with_reader(
         &self,
         matcher: &Matcher,
-        reader: &EntryReader,
+        reader: &TransactionReader,
     ) -> Result<Vec<Entry>> {
         let include_service = self.opts.is_include_service();
         let target_props = self.opts.target_properties();

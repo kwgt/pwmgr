@@ -10,7 +10,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt::{Display, Formatter};
 use std::ops::{Deref, RangeInclusive};
 
 use chrono::{DateTime, Duration, Local};
@@ -140,6 +140,20 @@ impl From<&Ulid> for ServiceId {
     }
 }
 
+// Intoトレイトの実装
+impl Into<String> for ServiceId {
+    fn into(self) -> String {
+        self.0.to_string()
+    }
+}
+
+// Displayトレイトの実装
+impl Display for ServiceId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.to_string())
+    }
+}
+
 // Valueトレイトの実装
 impl Value for ServiceId {
     type SelfType<'a> = ServiceId;
@@ -208,13 +222,6 @@ impl<'de> Deserialize<'de> for ServiceId {
                <[u8; 16]>::deserialize(deserializer)?
             )))
         }
-    }
-}
-
-// Displayトレイトの実装
-impl fmt::Display for ServiceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.to_string())
     }
 }
 

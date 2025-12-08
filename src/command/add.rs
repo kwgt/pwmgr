@@ -67,11 +67,17 @@ impl AddCommandContext {
     fn write_template(&self, id: &ServiceId) -> Result<PathBuf> {
         let content = ADD_TEMPLATE
             .replace("{{ID}}", &id.to_string())
-            .replace("{{SERVICE}}", self.default_service.as_deref().unwrap_or(""));
+            .replace(
+                "{{SERVICE}}",
+                self.default_service.as_deref().unwrap_or("")
+            );
 
         let path = std::env::temp_dir()
             .join(format!("pwmgr-add-{}.yml", id.to_string()));
-        fs::write(&path, content).context("テンプレートの書き込みに失敗しました")?;
+
+        fs::write(&path, content)
+            .context("テンプレートの書き込みに失敗しました")?;
+
         Ok(path)
     }
 
@@ -146,7 +152,9 @@ impl CommandContext for AddCommandContext {
         // 正規化したエントリを登録
         // Entry::new() で別名・タグをソート＋重複排除して正規化してから登録する
         if is_blank(&entry.service()) {
-            if self.prompter.ask_retry("サービス名が未入力です。再編集しますか？")? {
+            if self.prompter.ask_retry(
+                "サービス名が未入力です。再編集しますか？"
+            )? {
                 continue;
                 } else {
                     return Err(anyhow!("サービス名が未入力です"));
@@ -185,7 +193,9 @@ impl CommandContext for AddCommandContext {
 ///
 /// コマンドコンテキストの生成
 ///
-pub(crate) fn build_context(opts: &Options, sub_opts: &AddOpts) -> Result<Box<dyn CommandContext>> {
+pub(crate) fn build_context(opts: &Options, sub_opts: &AddOpts)
+    -> Result<Box<dyn CommandContext>>
+{
     Ok(Box::new(AddCommandContext::new(opts, sub_opts)?))
 }
 

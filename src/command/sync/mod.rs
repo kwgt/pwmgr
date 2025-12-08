@@ -350,15 +350,17 @@ impl CommandContext for SyncCommandContext {
     /// syncコマンドの実行
     ///
     fn exec(&self) -> Result<()> {
-        match &self.mode {
-            SyncMode::Server(addr) => {
-                server::run(addr, &self.manager)
-            }
+        self.manager.borrow_mut().with_write_transaction(|writer| {
+            match &self.mode {
+                SyncMode::Server(addr) => {
+                    server::run(addr, writer)
+                }
 
-            SyncMode::Client(addr) => {
-                client::run(addr, &self.manager, self.prompter.as_ref())
+                SyncMode::Client(addr) => {
+                    client::run(addr, writer, self.prompter.as_ref())
+                }
             }
-        }
+        })
     }
 }
 

@@ -6,7 +6,6 @@
 
 //! クライアント側の同期処理
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::net::TcpStream;
 
@@ -18,15 +17,15 @@ use crate::command::prompt::Prompter;
 use crate::command::sync::{
     recv_packet, send_packet, NodeRole, SyncPacket, PROTOCOL_VERSION,
 };
-use crate::database::types::Entry;
-use crate::database::EntryManager;
+use crate::database::{TransactionReadable, TransactionWriter};
+use crate::database::types::{Entry, ServiceId};
 
 /*
  * クライアントモードのエントリーポイント
  */
 pub(super) fn run(
     addr: &str,
-    manager: &RefCell<EntryManager>,
+    writer: &mut TransactionWriter,
     prompter: &dyn Prompter,
 ) -> Result<()> {
     /*
@@ -64,8 +63,7 @@ pub(super) fn run(
      * サーバからの全件受信フェーズ
      */
     let mut send_candidates: HashSet<String> = HashSet::new();
-    let mut remaining_local: HashSet<String> = manager
-        .borrow()
+    let mut remaining_local: HashSet<String> = writer
         .all_service()?
         .into_iter()
         .map(|id| id.to_string())
@@ -77,10 +75,10 @@ pub(super) fn run(
                 let entry_id = entry.id().to_string();
                 remaining_local.remove(&entry_id);
 
-                let decision = decide_entry(manager, &entry, prompter)?;
+                let decision = decide_entry(writer, &entry, prompter)?;
                 match decision {
                     EntryDecision::AdoptRemote => {
-                        apply_entry(manager, entry)?;
+                        writer.put(&entry)?;
                         send_ack(&mut stream, &entry_id, true, None)?;
                     }
                     EntryDecision::KeepLocal => {
@@ -118,9 +116,8 @@ pub(super) fn run(
     let mut sent = 0u64;
     for id_str in send_candidates {
         let entry = {
-            let mut mgr = manager.borrow_mut();
-            let id = crate::database::types::ServiceId::from_string(&id_str)?;
-            mgr.get(&id)?
+            let id = ServiceId::from_string(&id_str)?;
+            writer.get(&id)?
                 .ok_or_else(|| anyhow!("missing local entry {}", id_str))?
         };
 
@@ -170,15 +167,12 @@ enum EntryDecision {
  * 受信エントリをどう扱うか判定する
  */
 fn decide_entry(
-    manager: &RefCell<EntryManager>,
+    writer: &TransactionWriter,
     incoming: &Entry,
     prompter: &dyn Prompter,
 ) -> Result<EntryDecision> {
     let id = incoming.id();
-    let local_entry = {
-        let mut mgr = manager.borrow_mut();
-        mgr.get(&id)?
-    };
+    let local_entry = writer.get(&id)?;
 
     if local_entry.is_none() {
         return Ok(EntryDecision::AdoptRemote);
@@ -218,14 +212,6 @@ fn decide_entry(
         (None, Some(_)) => Ok(EntryDecision::KeepLocal),
         (None, None) => Ok(EntryDecision::KeepLocal),
     }
-}
-
-/*
- * エントリの適用
- */
-fn apply_entry(manager: &RefCell<EntryManager>, entry: Entry) -> Result<()> {
-    let mut mgr = manager.borrow_mut();
-    mgr.put(&entry)
 }
 
 /*

@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 
 use crate::cmd_args::{ImportOpts, Options};
 use crate::database::types::Entry;
-use crate::database::EntryManager;
+use crate::database::{EntryManager, TransactionReadable};
 use crate::command::prompt::Prompter;
 use super::CommandContext;
 use std::cell::RefCell;
@@ -69,7 +69,8 @@ impl ImportCommandContext {
     }
 
     ///
-    /// YAMLストリーミングからエントリを順次読み込み、トランザクション内で処理する
+    /// YAMLストリーミングからエントリを順次読み込んでトランザクション内で処理
+    /// する
     ///
     fn import_entries<R: Read>(&self, reader: R) -> Result<usize> {
         let mut deserializer = serde_yaml_ng::Deserializer::from_reader(reader);
@@ -105,7 +106,9 @@ impl ImportCommandContext {
                     }
 
                     // 上書き時は更新日時を比較して新しい方を残す
-                    let new_is_newer = match (entry.last_update(), existing.last_update()) {
+                    let new_is_newer = match
+                        (entry.last_update(), existing.last_update())
+                    {
                         (Some(new), Some(old)) => new > old,
                         (Some(_), None) => true,
                         _ => false,
