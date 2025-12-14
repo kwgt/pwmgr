@@ -26,7 +26,7 @@ use crate::command::{
     add, edit, export, import, list, query, remove, search, sync, tags, CommandContext
 };
 use crate::database::EntryManager;
-use config::{Config, ListSortMode, TagsSortMode};
+use config::Config;
 
 /// デフォルトのエディタ名
 static DEFAULT_EDITOR: LazyLock<&'static str> = LazyLock::new(|| {
@@ -177,6 +177,10 @@ pub struct Options {
     #[arg(short = 'L', long = "log-output", value_name = "PATH")]
     log_output: Option<PathBuf>,
 
+    /// ログを標準出力にも同時出力するか否か
+    #[arg(long = "log-tee")]
+    log_tee: bool,
+
     /// データベースファイルのパス
     #[arg(short = 'd', long = "db-path")]
     db_path: Option<PathBuf>,
@@ -229,6 +233,16 @@ impl Options {
         } else {
             default_log_path()
         }
+    }
+
+    ///
+    /// ログの標準出力同時出力フラグへのアクセサ
+    ///
+    /// # 戻り値
+    /// ログの標準出力同時出力が有効であればtrueを返す
+    ///
+    fn log_tee(&self) -> bool {
+        self.log_tee
     }
 
     ///
@@ -426,6 +440,7 @@ impl Options {
         println!("   database path: {}", self.db_path().display());
         println!("   log level:     {}", self.log_level().as_ref());
         println!("   log output:    {}", self.log_output().display());
+        println!("   log tee:       {}", self.log_tee());
         println!("   editor:        {}", self.editor());
 
         // サブコマンドが指定されており、そのサブコマンドがオプションを持つなら
@@ -680,6 +695,37 @@ pub(crate) enum MatchMode {
 }
 
 ///
+/// ソートモードを表す列挙子
+///
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SortMode {
+    /// デフォルト（ID順）
+    Default,
+
+    /// サービス名でソート
+    ServiceName,
+
+    /// 更新日時でソート
+    LastUpdate,
+}
+
+///
+/// タグ一覧のソートモードを表す列挙子
+///
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TagsSortMode {
+    /// デフォルト（タグ名でソート）
+    Default,
+
+    /// 登録件数でソート
+    NumberOfRegist,
+}
+
+///
 /// サブコマンドsearchのオプション
 ///
 #[derive(Clone, Args, Debug)]
@@ -705,6 +751,14 @@ pub(crate) struct SearchOpts {
         help = "マッチモード\n"
     )]
     match_mode: Option<MatchMode>,
+
+    /// ソートモード
+    #[arg(long = "sort-by", value_enum, value_name = "MODE")]
+    sort_by: Option<SortMode>,
+
+    /// ソート順を逆順にする
+    #[arg(short = 'r', long = "reverse-sort")]
+    reverse_sort: bool,
 
     /// 検索のためのキー
     #[arg()]
@@ -750,6 +804,20 @@ impl SearchOpts {
     }
 
     ///
+    /// ソートモードの取得
+    ///
+    pub(crate) fn sort_mode(&self) -> SortMode {
+        self.sort_by.unwrap_or(SortMode::Default)
+    }
+
+    ///
+    /// ソートを逆順にするか
+    ///
+    pub(crate) fn reverse_sort(&self) -> bool {
+        self.reverse_sort
+    }
+
+    ///
     /// 検索キーを取得
     ///
     pub(crate) fn key(&self) -> String {
@@ -766,6 +834,8 @@ impl SearchOpts {
         tags: Vec<String>,
         properties: Vec<String>,
         match_mode: MatchMode,
+        sort_mode: SortMode,
+        reverse_sort: bool,
         key: impl Into<String>,
     ) -> Self {
         Self {
@@ -773,6 +843,8 @@ impl SearchOpts {
             tags,
             properties: Some(properties),
             match_mode: Some(match_mode),
+            sort_by: Some(sort_mode),
+            reverse_sort,
             key_string: key.into(),
         }
     }
@@ -799,6 +871,14 @@ impl ApplyConfig for SearchOpts {
         if self.properties.is_none() {
             self.properties = config.search_target_properties();
         }
+
+        if self.sort_by.is_none() {
+            self.sort_by = config.search_sort_mode();
+        }
+
+        if !self.reverse_sort {
+            self.reverse_sort = config.search_reverse_sort().unwrap_or(false);
+        }
     }
 }
 
@@ -810,6 +890,8 @@ impl ShowOptions for SearchOpts {
         println!("   target tags:       {:?}", self.target_tags());
         println!("   target properties: {:?}", self.target_properties());
         println!("   match mode:        {:?}", self.match_mode());
+        println!("   sort mode:         {:?}", self.sort_mode());
+        println!("   reverse sort:      {}", self.reverse_sort());
         println!("   search key:        {}", self.key());
     }
 }
@@ -857,17 +939,21 @@ pub(crate) struct ListOpts {
     #[arg(long = "tag-and")]
     tag_and: bool,
 
-    /// サービス名でソートする（デフォルトはID）
-    #[arg(short = 'N', long = "sort-by-service-name")]
-    sort_by_service_name: bool,
-
-    /// 最終更新日時でソートする
-    #[arg(short = 'L', long = "sort-by-last-update")]
-    sort_by_last_update: bool,
+    /// ソートモード
+    #[arg(long = "sort-by", value_enum, value_name = "MODE")]
+    sort_by: Option<SortMode>,
 
     /// ソート順を逆順にする
     #[arg(short = 'r', long = "reverse-sort")]
     reverse_sort: bool,
+
+    /// 互換用: サービス名でソートする
+    #[arg(short = 'N', long = "sort-by-service-name", hide = true)]
+    sort_by_service_name_compat: bool,
+
+    /// 互換用: 最終更新日時でソートする
+    #[arg(short = 'L', long = "sort-by-last-update", hide = true)]
+    sort_by_last_update_compat: bool,
 
     /// 削除済みエントリも表示する
     #[arg(long = "with-removed")]
@@ -892,17 +978,18 @@ impl ListOpts {
     }
 
     ///
-    /// サービス名でソートするか
+    /// ソートモードの取得
     ///
-    pub(crate) fn sort_by_service_name(&self) -> bool {
-        self.sort_by_service_name
-    }
-
-    ///
-    /// 最終更新日時でソートするか
-    ///
-    pub(crate) fn sort_by_last_update(&self) -> bool {
-        self.sort_by_last_update
+    pub(crate) fn sort_mode(&self) -> SortMode {
+        if let Some(mode) = self.sort_by {
+            mode
+        } else if self.sort_by_last_update_compat {
+            SortMode::LastUpdate
+        } else if self.sort_by_service_name_compat {
+            SortMode::ServiceName
+        } else {
+            SortMode::Default
+        }
     }
 
     ///
@@ -935,23 +1022,16 @@ impl ApplyConfig for ListOpts {
             self.with_removed = config.list_with_removed().unwrap_or(false);
         }
 
-        if !(self.sort_by_service_name && self.sort_by_last_update) {
-            if let Some(mode) = config.list_sort_mode() {
-                match mode {
-                    ListSortMode::Default => {
-                        self.sort_by_service_name = false;
-                        self.sort_by_last_update = false;
-                    }
-                    ListSortMode::ServiceName => {
-                        self.sort_by_service_name = true;
-                        self.sort_by_last_update = false;
-                    }
-                    ListSortMode::LastUpdate => {
-                        self.sort_by_service_name = false;
-                        self.sort_by_last_update = true;
-                    }
-                }
+        if self.sort_by.is_none() {
+            if self.sort_by_last_update_compat {
+                self.sort_by = Some(SortMode::LastUpdate);
+            } else if self.sort_by_service_name_compat {
+                self.sort_by = Some(SortMode::ServiceName);
             }
+        }
+
+        if self.sort_by.is_none() {
+            self.sort_by = config.list_sort_mode();
         }
     }
 }
@@ -962,9 +1042,8 @@ impl ShowOptions for ListOpts {
         println!("list command options");
         println!("   target_tags:   {:?}", self.tags);
         println!("   tag_and:       {}", self.is_tag_and());
-        println!("   sort_by_name:  {}", self.sort_by_service_name());
+        println!("   sort_mode:     {:?}", self.sort_mode());
         println!("   reverse_sort:  {}", self.reverse_sort());
-        println!("   sort_by_last: {}", self.sort_by_last_update());
         println!("   with_removed:  {}", self.with_removed());
     }
 }
@@ -978,13 +1057,17 @@ pub(crate) struct TagsOpts {
     #[arg(short = 'n', long = "number")]
     number: bool,
 
-    /// 件数でソートするフラグ（デフォルトは降順、--reverse-sortで反転）
-    #[arg(short = 'N', long = "sort-by-number")]
-    sort_by_number: bool,
+    /// ソートモード
+    #[arg(long = "sort-by", value_enum, value_name = "MODE")]
+    sort_by: Option<TagsSortMode>,
 
     /// ソート結果を反転するフラグ
     #[arg(short = 'r', long = "reverse-sort")]
     reverse_sort: bool,
+
+    /// 互換用: 件数でソートする
+    #[arg(short = 'N', long = "sort-by-number", hide = true)]
+    sort_by_number_compat: bool,
 
     /// マッチモード
     #[arg(
@@ -1010,10 +1093,16 @@ impl TagsOpts {
     }
 
     ///
-    /// 件数ソートの有無を返す
+    /// ソートモードを返す
     ///
-    pub(crate) fn sort_by_number(&self) -> bool {
-        self.sort_by_number
+    pub(crate) fn sort_mode(&self) -> TagsSortMode {
+        if let Some(mode) = self.sort_by {
+            mode
+        } else if self.sort_by_number_compat {
+            TagsSortMode::NumberOfRegist
+        } else {
+            TagsSortMode::Default
+        }
     }
 
     ///
@@ -1044,15 +1133,16 @@ impl TagsOpts {
     #[allow(dead_code)]
     pub(crate) fn new_for_test(
         number: bool,
-        sort_by_number: bool,
+        sort_by: TagsSortMode,
         reverse_sort: bool,
         match_mode: MatchMode,
         key: Option<String>,
     ) -> Self {
         Self {
             number,
-            sort_by_number,
+            sort_by: Some(sort_by),
             reverse_sort,
+            sort_by_number_compat: false,
             match_mode: Some(match_mode),
             key,
         }
@@ -1070,13 +1160,12 @@ impl ApplyConfig for TagsOpts {
             self.reverse_sort = config.tags_reverse_sort().unwrap_or(false);
         }
 
-        if !self.sort_by_number {
-            if let Some(mode) = config.tags_sort_mode() {
-                match mode {
-                    TagsSortMode::Default => self.sort_by_number = false,
-                    TagsSortMode::NumberOfRegist => self.sort_by_number = true,
-                }
-            }
+        if self.sort_by.is_none() && self.sort_by_number_compat {
+            self.sort_by = Some(TagsSortMode::NumberOfRegist);
+        }
+
+        if self.sort_by.is_none() {
+            self.sort_by = config.tags_sort_mode();
         }
 
         if self.match_mode.is_none() {
@@ -1091,7 +1180,7 @@ impl ShowOptions for TagsOpts {
 
         println!("tags command options");
         println!("   number:          {}", self.number());
-        println!("   sort_by_number:  {}", self.sort_by_number());
+        println!("   sort_mode:       {:?}", self.sort_mode());
         println!("   reverse_sort:    {}", self.reverse_sort());
         println!("   match_mode:      {:?}", self.match_mode());
         println!("   key:             {}", key);
@@ -1400,6 +1489,8 @@ mod tests {
 with_service_name = true
 match_mode = "regex"
 target_properties = ["user", "pass"]
+sort_mode = "service_name"
+reverse_sort = true
 "#,
         );
 
@@ -1408,6 +1499,8 @@ target_properties = ["user", "pass"]
             tags: vec![],
             properties: None,
             match_mode: None,
+            sort_by: None,
+            reverse_sort: false,
             key_string: "dummy".into(),
         };
 
@@ -1419,6 +1512,8 @@ target_properties = ["user", "pass"]
             opts.target_properties(),
             vec!["user".to_string(), "pass".to_string()]
         );
+        assert_eq!(opts.sort_mode(), SortMode::ServiceName);
+        assert!(opts.reverse_sort());
     }
 
     #[test]
@@ -1436,17 +1531,17 @@ with_removed = true
         let mut opts = ListOpts {
             tags: vec![],
             tag_and: false,
-            sort_by_service_name: false,
-            sort_by_last_update: false,
             reverse_sort: false,
+            sort_by: None,
+            sort_by_service_name_compat: false,
+            sort_by_last_update_compat: false,
             with_removed: false,
         };
 
         opts.apply_config(&cfg);
 
         assert!(opts.is_tag_and());
-        assert!(!opts.sort_by_service_name());
-        assert!(opts.sort_by_last_update());
+        assert_eq!(opts.sort_mode(), SortMode::LastUpdate);
         assert!(opts.reverse_sort());
         assert!(opts.with_removed());
     }
@@ -1464,8 +1559,9 @@ reverse_sort = true
 
         let mut opts = TagsOpts {
             number: false,
-            sort_by_number: false,
             reverse_sort: false,
+            sort_by: None,
+            sort_by_number_compat: false,
             match_mode: Some(MatchMode::Exact),
             key: None,
         };
@@ -1473,7 +1569,7 @@ reverse_sort = true
         opts.apply_config(&cfg);
 
         assert!(opts.number());
-        assert!(opts.sort_by_number());
+        assert_eq!(opts.sort_mode(), TagsSortMode::NumberOfRegist);
         assert!(opts.reverse_sort());
         assert_eq!(opts.match_mode(), MatchMode::Exact);
     }

@@ -14,7 +14,8 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use flexi_logger::{
-    Cleanup, Criterion, DeferredNow, FileSpec, Logger, Naming, WriteMode
+    Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Logger, Naming,
+    WriteMode
 };
 use log::Record;
 
@@ -43,6 +44,7 @@ const MAX_LOG_FILES: usize = 10;
 pub(super) fn init(opts: &Options) -> Result<()> {
     let level = opts.log_level();
     let path = opts.log_output();
+    let tee = opts.log_tee();
 
     /*
      * オプションの設定状況に応じてロガーを初期化
@@ -52,20 +54,20 @@ pub(super) fn init(opts: &Options) -> Result<()> {
 
     } else if path.exists() {
         if path.is_file() {
-            init_for_file(level, &path)?;
+            init_for_file(level, &path, tee)?;
 
         } else if path.is_dir() {
-            init_for_directory(level, &path)?;
+            init_for_directory(level, &path, tee)?;
 
         } else {
             return Err(anyhow!("invalid log output path"));
         }
 
     } else if path.extension().is_some() {
-        init_for_file(level, &path)?;
+        init_for_file(level, &path, tee)?;
 
     } else {
-        init_for_directory(level, &path)?;
+        init_for_directory(level, &path, tee)?;
     }
 
     /*
@@ -162,7 +164,7 @@ where
 /// # 注記
 /// 出力先のファイルが存在しない場合はファイルの作成を試みる。
 ///
-fn init_for_file<S, P>(level: S, path: P) -> Result<()>
+fn init_for_file<S, P>(level: S, path: P, tee: bool) -> Result<()>
 where
     S: AsRef<str>,
     P: AsRef<Path>
@@ -178,11 +180,14 @@ where
         File::create(&path)?;
     }
 
-    let path = std::fs::canonicalize(path)?;
-
     Logger::try_with_env_or_str(level)?
-        .log_to_file(FileSpec::try_from(path)?)
+        .log_to_file(FileSpec::try_from(std::fs::canonicalize(path)?)?)
         .format(format)
+        .duplicate_to_stdout(if tee {
+            Duplicate::All
+        } else {
+            Duplicate::None
+        })
         .append()
         .write_mode(WriteMode::Direct)
         .start()?;
@@ -197,7 +202,7 @@ where
 /// ログローテションはログの量が2Mバイトを超えた場合に行う。また、ログファイル
 /// は10本までを保存する。
 ///
-fn init_for_directory<S, P>(level:S, path: P) -> Result<()>
+fn init_for_directory<S, P>(level:S, path: P, tee: bool) -> Result<()>
 where
     S: AsRef<str>,
     P: AsRef<Path>
@@ -214,6 +219,11 @@ where
     Logger::try_with_env_or_str(level)?
         .log_to_file(path)
         .format(format)
+        .duplicate_to_stdout(if tee {
+            Duplicate::All
+        } else {
+             Duplicate::None
+        })
         .append()
         .rotate(
             Criterion::Size(MAX_LOG_SIZE),

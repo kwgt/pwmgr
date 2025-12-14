@@ -19,3 +19,4 @@ ulid = { version = "1.2.1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 flexi_logger = "0.31.7"
 log = "0.4.29"
+fnv = "1.0.7"

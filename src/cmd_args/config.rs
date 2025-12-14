@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use super::{default_db_path, default_log_path};
-use super::{LogLevel, MatchMode, DEFAULT_EDITOR};
+use super::{LogLevel, MatchMode, SortMode, TagsSortMode, DEFAULT_EDITOR};
 
 ///
 /// コンフィギュレーションデータを集約する構造体
@@ -122,6 +122,22 @@ impl Config {
     }
 
     ///
+    /// searchサブコマンドのソートモードへのアクセサ
+    ///
+    pub(super) fn search_sort_mode(&self) -> Option<SortMode> {
+        self.search.as_ref().and_then(|search| search.sort_mode)
+    }
+
+    ///
+    /// searchサブコマンドでソートを逆順にするか否かへのアクセサ
+    ///
+    pub(super) fn search_reverse_sort(&self) -> Option<bool> {
+        self.search
+            .as_ref()
+            .and_then(|search| search.reverse_sort)
+    }
+
+    ///
     /// listサブコマンドでタグをAND解釈するか否かへのアクセサ
     ///
     pub(super) fn list_tag_and(&self) -> Option<bool> {
@@ -131,7 +147,7 @@ impl Config {
     ///
     /// listサブコマンドのソートモードへのアクセサ
     ///
-    pub(super) fn list_sort_mode(&self) -> Option<ListSortMode> {
+    pub(super) fn list_sort_mode(&self) -> Option<SortMode> {
         self.list.as_ref().and_then(|list| list.sort_mode.clone())
     }
 
@@ -214,10 +230,12 @@ impl Default for Config {
                 with_service_name: Some(false),
                 match_mode: Some(MatchMode::Contains),
                 target_properties: Some(vec![]),
+                sort_mode: Some(SortMode::Default),
+                reverse_sort: Some(false),
             }),
             list: Some(ListInfo {
                 tag_and: Some(false),
-                sort_mode: Some(ListSortMode::Default),
+                sort_mode: Some(SortMode::Default),
                 reverse_sort: Some(false),
                 with_removed: Some(false),
             }),
@@ -281,6 +299,12 @@ struct SearchInfo {
 
     /// 検索対象とするプロパティ名のリスト
     target_properties: Option<Vec<String>>,
+
+    /// ソートモード
+    sort_mode: Option<SortMode>,
+
+    /// ソートを逆順にするか
+    reverse_sort: Option<bool>,
 }
 
 ///
@@ -292,29 +316,13 @@ struct ListInfo {
     tag_and: Option<bool>,
 
     /// ソートモード
-    sort_mode: Option<ListSortMode>,
+    sort_mode: Option<SortMode>,
 
     /// ソート順を逆順にするか
     reverse_sort: Option<bool>,
 
     /// 削除済みエントリも表示するか
     with_removed: Option<bool>,
-}
-
-///
-/// listサブコマンドのソートモードを表す列挙子
-///
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum ListSortMode {
-    /// デフォルト(エントリIDソート)
-    Default,
-
-    /// サービス名でソート
-    ServiceName,
-
-    /// 更新日時でソート
-    LastUpdate,
 }
 
 ///
@@ -333,19 +341,6 @@ struct TagsInfo {
 
     /// マッチモード
     match_mode: Option<MatchMode>,
-}
-
-///
-/// tagsサブコマンドのソートモードを表す列挙子
-///
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum TagsSortMode {
-    /// デフォルト(タグ名でソート)
-    Default,
-
-    /// 登録件数でソート
-    NumberOfRegist,
 }
 
 #[cfg(test)]
@@ -379,11 +374,16 @@ mod tests {
             config.search_target_properties(),
             Some(vec![])
         );
+        assert_eq!(
+            config.search_sort_mode(),
+            Some(SortMode::Default)
+        );
+        assert_eq!(config.search_reverse_sort(), Some(false));
 
         assert_eq!(config.list_tag_and(), Some(false));
         assert_eq!(
             config.list_sort_mode(),
-            Some(ListSortMode::Default)
+            Some(SortMode::Default)
         );
         assert_eq!(config.list_reverse_sort(), Some(false));
         assert_eq!(config.list_with_removed(), Some(false));
@@ -413,6 +413,8 @@ match_mode = "regex"
 with_service_name = true
 match_mode = "exact"
 target_properties = ["user", "pass"]
+sort_mode = "service_name"
+reverse_sort = true
 
 [list]
 tag_and = true
@@ -451,11 +453,16 @@ match_mode = "fuzzy"
             config.search_target_properties(),
             Some(vec!["user".to_string(), "pass".to_string()])
         );
+        assert_eq!(
+            config.search_sort_mode(),
+            Some(SortMode::ServiceName)
+        );
+        assert_eq!(config.search_reverse_sort(), Some(true));
 
         assert_eq!(config.list_tag_and(), Some(true));
         assert_eq!(
             config.list_sort_mode(),
-            Some(ListSortMode::LastUpdate)
+            Some(SortMode::LastUpdate)
         );
         assert_eq!(config.list_reverse_sort(), Some(true));
         assert_eq!(config.list_with_removed(), Some(true));

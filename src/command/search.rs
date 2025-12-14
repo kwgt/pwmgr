@@ -12,14 +12,14 @@ use std::cell::RefCell;
 
 use anyhow::{anyhow, Result};
 
-use crate::cmd_args::{SearchOpts, Options};
+use crate::cmd_args::{Options, SearchOpts, SortMode};
 use crate::command::matcher::Matcher;
 use crate::database::types::Entry;
-use crate::database::{EntryManager, TransactionReader, TransactionReadable};
+use crate::database::{EntryManager, TransactionReadable, TransactionReader};
 use super::CommandContext;
 
 ///
-/// addサブコマンドのコンテキスト情報をパックした構造体
+/// searchサブコマンドのコンテキスト情報をパックした構造体
 ///
 struct SearchCommandContext {
     /// データベースオブジェクト
@@ -132,6 +132,37 @@ impl SearchCommandContext {
     }
 
     ///
+    /// ヒット一覧をソートする
+    ///
+    fn sort_hits(&self, hits: &mut Vec<Entry>) {
+        match self.opts.sort_mode() {
+            SortMode::ServiceName => hits.sort_by(|a, b| {
+                a.service()
+                    .to_lowercase()
+                    .cmp(&b.service().to_lowercase())
+                    .then_with(|| a.id().cmp(&b.id()))
+            }),
+            SortMode::LastUpdate => hits.sort_by(|a, b| {
+                let a_key = (a.last_update().is_none(), a.last_update());
+                let b_key = (b.last_update().is_none(), b.last_update());
+                a_key
+                    .cmp(&b_key)
+                    .then_with(|| {
+                        a.service()
+                            .to_lowercase()
+                            .cmp(&b.service().to_lowercase())
+                    })
+                    .then_with(|| a.id().cmp(&b.id()))
+            }),
+            SortMode::Default => hits.sort_by(|a, b| a.id().cmp(&b.id())),
+        }
+
+        if self.opts.reverse_sort() {
+            hits.reverse();
+        }
+    }
+
+    ///
     /// テキストでエントリを出力する
     ///
     fn print_entry(entry: &Entry) -> Result<()> {
@@ -144,12 +175,13 @@ impl SearchCommandContext {
 impl CommandContext for SearchCommandContext {
     fn exec(&self) -> Result<()> {
         let matcher = Matcher::new(self.opts.match_mode(), self.opts.key())?;
-        let hits = self.collect_hits(&matcher)?;
+        let mut hits = self.collect_hits(&matcher)?;
 
         if hits.is_empty() {
             return Err(anyhow!("該当するエントリが見つかりませんでした"));
         }
 
+        self.sort_hits(&mut hits);
         for entry in hits.iter() {
             Self::print_entry(entry)?;
         }
@@ -232,6 +264,8 @@ mod tests {
             vec![],
             vec![],
             MatchMode::Contains,
+            SortMode::Default,
+            false,
             "alp",
         );
         let ctx = build_ctx(opts);
@@ -251,6 +285,8 @@ mod tests {
             vec![],                 // tagsなし
             vec!["user".into()],    // userプロパティのみ対象
             MatchMode::Exact,
+            SortMode::Default,
+            false,
             "bob",
         );
         let ctx = build_ctx(opts);
@@ -270,6 +306,8 @@ mod tests {
             vec!["t3".into()], // どのエントリにも存在しないタグ
             vec![],
             MatchMode::Exact,
+            SortMode::Default,
+            false,
             "Alpha",
         );
         let ctx = build_ctx(opts);
@@ -288,6 +326,8 @@ mod tests {
             vec![],
             vec![],
             MatchMode::Regex,
+            SortMode::Default,
+            false,
             "^Be.*$",
         );
         let ctx = build_ctx(opts);
@@ -307,6 +347,8 @@ mod tests {
             vec![],
             vec![],
             MatchMode::Fuzzy,
+            SortMode::Default,
+            false,
             "Btea",
         );
         let ctx = build_ctx(opts);

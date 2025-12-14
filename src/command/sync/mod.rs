@@ -17,6 +17,7 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd_args::{Options, SyncMode, SyncOpts};
@@ -350,6 +351,16 @@ impl CommandContext for SyncCommandContext {
     /// syncコマンドの実行
     ///
     fn exec(&self) -> Result<()> {
+        match &self.mode {
+            SyncMode::Server(addr) => {
+                info!("sync start: server mode @ {}", addr);
+            }
+
+            SyncMode::Client(addr) => {
+                info!("sync start: client mode -> {}", addr);
+            }
+        }
+
         self.manager.borrow_mut().with_write_transaction(|writer| {
             match &self.mode {
                 SyncMode::Server(addr) => {
@@ -360,7 +371,19 @@ impl CommandContext for SyncCommandContext {
                     client::run(addr, writer, self.prompter.as_ref())
                 }
             }
-        })
+        })?;
+
+        match &self.mode {
+            SyncMode::Server(addr) => {
+                info!("sync finished: server mode @ {}", addr);
+            }
+
+            SyncMode::Client(addr) => {
+                info!("sync finished: client mode -> {}", addr);
+            }
+        }
+
+        Ok(())
     }
 }
 

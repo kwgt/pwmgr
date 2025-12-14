@@ -10,10 +10,12 @@
 
 use std::cell::RefCell;
 use std::fs;
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use fnv::FnvHasher;
 use log::info;
 use serde_yaml_ng;
 
@@ -23,6 +25,15 @@ use crate::command::editor::{default_editor_launcher, rewrite_id_line};
 use crate::database::EntryManager;
 use crate::database::types::{Entry, ServiceId};
 use super::CommandContext;
+
+fn calc_hash<S>(s: S) -> u64
+where 
+    S: AsRef<str>
+{
+    let mut hasher = FnvHasher::default();
+    hasher.write(s.as_ref().as_bytes());
+    hasher.finish()
+}
 
 ///
 /// addサブコマンドのコンテキスト情報をパックした構造体
@@ -78,36 +89,61 @@ impl EditCommandContext {
     ///
     /// テンプレートを一時ファイルに書き出し、パスを返す
     ///
-    fn write_entry(&self, entry: &Entry) -> Result<PathBuf> {
+    fn write_entry(&self, entry: &Entry) -> Result<(PathBuf, u64)> {
         let content = serde_yaml_ng::to_string(entry)
             .context("エントリのYAML化に失敗しました")?;
         let path = std::env::temp_dir()
             .join(format!("pwmgr-edit-{}.yml", entry.id().to_string()));
-        fs::write(&path, content).context("エントリの書き出しに失敗しました")?;
-        Ok(path)
+
+        fs::write(&path, &content).context("エントリの書き出しに失敗しました")?;
+
+        Ok((path, calc_hash(&content)))
     }
 }
 
 // CommandContextトレイトの実装
 impl CommandContext for EditCommandContext {
     fn exec(&self) -> Result<()> {
+        /*
+         * 引数で渡されたIDの変換(兼フォーマットのチェック)
+         */
         let id = ServiceId::from_string(&self.target_id)
             .map_err(|_| anyhow!("IDの形式が不正です: {}", self.target_id))?;
 
+        /*
+         * 対象エントリの読み出し
+         */
         let entry = self.manager.borrow_mut()
             .get(&id)?
             .ok_or_else(|| {
                 anyhow!("指定されたIDのエントリが見つかりません: {}", id)
             })?;
 
-        let path = self.write_entry(&entry)?;
+        /*
+         * テンポラリファイルへの書き出しj
+         */
+        let (path, hash) = self.write_entry(&entry)?;
 
         loop {
+            /*
+             * エディタの起動
+             */
             (self.editor_launcher)(path.as_path())?;
 
+            /*
+             * 編集結果の読み出し
+             */
             let content = fs::read_to_string(&path)
                 .context("編集結果の読み込みに失敗しました")?;
 
+            // 未編集の場合はそのまま終了
+            if calc_hash(&content) == hash {
+                return Ok(());
+            }
+
+            /*
+             * エントリへの変換(兼フォーマットチェック)
+             */
             let entry_new: Entry = match serde_yaml_ng::from_str(&content) {
                 Ok(entry) => entry,
                 Err(err) => {
@@ -121,6 +157,7 @@ impl CommandContext for EditCommandContext {
                 }
             };
 
+            // IDが編集されている場合はエラー
             if entry_new.id() != id {
                 if self.prompter.ask_retry(
                     "IDが変更されています。IDは変更しないでください。"
@@ -134,7 +171,9 @@ impl CommandContext for EditCommandContext {
                 }
             }
 
-            // 正規化して保存
+            /*
+             * 正規化して保存
+             */
             let entry_norm = Entry::new(
                 id.clone(),
                 entry_new.service(),
@@ -147,7 +186,7 @@ impl CommandContext for EditCommandContext {
             entry_norm.set_last_update_now();
 
             self.manager.borrow_mut().put(&entry_norm)?;
-            info!("edit: id={}, service={}", id, entry_norm.service());
+            info!("update: id={}, service={}", id, entry_norm.service());
             break;
         }
 

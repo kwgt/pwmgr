@@ -163,6 +163,8 @@ pwmgr search [OPTIONS] <KEY>
 | `-t`, `--tag <TAG>` | 検索対象とするタグ(複数指定可) | 
 | `-p`, `--property <PROPERTY_NAME>` | 検索対象とするプロパティ(複数指定可) | 
 | `-m`, `--match-mode <MODE>` | 検索時のマッチモードの選択 | exact
+| `--sort-by <MODE>` | 検索結果のソートモード(`default`/`service_name`/`last_update`) |
+| `-r`, `--reverse-sort` | ソートを逆順で行う |
 | `-h`, `--help`      | ヘルプメッセージの表示  |
 
 ##### 概要
@@ -173,6 +175,8 @@ pwmgr search [OPTIONS] <KEY>
 `--property`オプションでプロパティ名を指定したときは、そのプロパティを検索対象とする(例えば特定の住所で登録されたエントリの検索などを想定)。
 
 `--regex`オプションが指定された場合はKEYを正規表現と見なし、正規表現にマッチするエントリの検索を行う。
+
+`--sort-by`で出力順を指定できる。`default`はID昇順、`service_name`はサービス名昇順、`last_update`は更新日時昇順（更新日時未設定は末尾）。`--reverse-sort`で順序を反転させる。
 
 ----
 #### addコマンド
@@ -248,8 +252,7 @@ pwmgr list [OPTIONS]
 | オプション | 意味 | デフォルト値
 |:--|:--|:--
 | `-t`, `--tag <TAG>` | リストアップ対象タグ(複数指定可) |
-| `-N`, `--sort-by-service-name` | エントリの表示順をサービス名でソートする |
-| `-L`, `--sort-by-last-update` | エントリの更新日時でソートする |
+| `--sort-by <MODE>` | エントリの表示順をソートする(`default`/`service_name`/`last_update`) |
 | `-r`, `--reverse-sort` | ソートを逆順で行う | 
 | `--with-removed` | 削除済みエントリも一覧に含める |
 | `-h`, `--help`      | ヘルプメッセージの表示  |
@@ -261,6 +264,8 @@ pwmgr list [OPTIONS]
 `--tag`でタグ名が指定された場合は、そのタグの一覧を出力する。複数`--tag`オプションが指定された場合は指定されたタグ全てが出力対象となる。
 
 `--with-removed`を指定した場合は、削除済みエントリも含めて表示を行う。この場合、削除済みエントリのID末尾には'!'を付与し削除済みエントリであることを表す。
+
+`--sort-by`で出力順を指定できる。`default`はID昇順、`service_name`はサービス名昇順、`last_update`は更新日時昇順（更新日時未設定は末尾）。`--reverse-sort`で順序を反転させる。
 
 ----
 #### tagsコマンド
@@ -275,7 +280,7 @@ pwmgr tags [OPTIONS] [KEY]
 |:--|:--|:--
 | `-m`, `--match-mode <MODE>` | 検索時のマッチモードの選択 | exact 
 | `-n`, `--number`  | 登録件数表示モード | 
-| `-N`, `--sort-by-number` | 登録件数によるソート | 
+| `--sort-by <MODE>` | ソートモード(`default`/`number_of_regist`) |
 | `-r`, `--reverse-sort` | ソートを逆順で行う | 
 | `-h`, `--help`    | ヘルプメッセージの表示  |
 
@@ -292,7 +297,7 @@ pwmgr tags [OPTIONS] [KEY]
 
 `--number`でタグ毎の登録件数の表示を行う事ができる。
 
-`--sort-by-number`を指定すると表示順序を件数順でソートするようになる(標準は降順でソート)。
+`--sort-by`で出力順を指定できる。`default`はタグ名昇順、`number_of_regist`は件数降順（件数同一時はタグ名昇順）。`--reverse-sort`で順序を反転させる。
 
 タグが全く登録されていない場合は「付与されたタグはありません」と表示しエラーとして扱う。
 
@@ -417,6 +422,14 @@ pwmgr sync --client <CONNECT-ADDR[:PORT]>
 | `with_service_name` | 検索対象にサービス名を含めるか否か | `--service` | false
 | `match_mode` | 検索時のマッチモード | `--match-mode` | contains
 | `target_properties` | 検索対象とするプロパティの名前のリスト | `--properties` | 空のVec<String>
+| `sort_mode` | ソート指示 | `--sort-by` | "default"
+| `reverse_sort` | ソート順序を逆順にするか否か | `--reverse-sort` | false
+
+`sort_mode`に指定できる値は以下の何れかとする。
+
+ - "default" : デフォルト(エントリIDでソート) 
+ - "service_name" : サービス名でソート
+ - "last_update" : 更新日時でソート
 
 #### listテーブル
 `list`サブコマンドのオプションに対するデフォルト値を定義し以下のキーを定義する。
@@ -424,7 +437,7 @@ pwmgr sync --client <CONNECT-ADDR[:PORT]>
 | キー | 設定内容 | 対応オプション | デフォルト値
 |:--|:--|:--
 | `tag_and` | 複数タグ指定時にAND評価を行うか否か | `--tag-and` | false
-| `sort_mode` | ソート指示 | `--sort-by-service-name` <br> `--sort-by-service-name` | "default"
+| `sort_mode` | ソート指示 | `--sort-by` | "default"
 | `reverse_sort` | ソート順序を逆順にするか否か | `--reverse-sort` | false
 | `with_removed` | 削除済みエントリも表示するか否か | `--with-removed` | false
 
@@ -440,7 +453,7 @@ pwmgr sync --client <CONNECT-ADDR[:PORT]>
 | キー | 設定内容 | 対応オプション | デフォルト値
 |:--|:--|:--
 | `with_number` | 付与件数も表示するか否か | `--number` | false
-| `sort_mode` | ソート指示 | `--sort-by-number` | "default"
+| `sort_mode` | ソート指示 | `--sort-by` | "default"
 | `reverse_sort` | ソート順序を逆順にするか否か | `--reverse-sort` | false
 
 `sort_mode`に指定できる値は以下の何れかとする。

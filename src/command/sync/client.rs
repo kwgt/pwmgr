@@ -11,6 +11,7 @@ use std::net::TcpStream;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
+use log::{debug, error, info};
 use ulid::Ulid;
 
 use crate::command::prompt::Prompter;
@@ -31,18 +32,25 @@ pub(super) fn run(
     /*
      * サーバへ接続
      */
+    info!("client: connect to {}", addr);
     let mut stream = TcpStream::connect(addr)
         .with_context(|| format!("connect {}", addr))?;
+
+    let node_id = Ulid::new().to_string();
 
     /*
      * Helloの送信
      */
     send_packet(&mut stream, SyncPacket::hello(
         PROTOCOL_VERSION,
-        Ulid::new().to_string(),
+        node_id.clone(),
         NodeRole::Client,
         Local::now().timestamp_millis() as u64,
     ))?;
+    debug!(
+        "client: sent Hello proto={}, node={}",
+        PROTOCOL_VERSION, node_id
+    );
 
     /*
      * HelloAckの受信と確認
@@ -53,21 +61,28 @@ pub(super) fn run(
     };
 
     if !ack.accepted || ack.protocol_version != PROTOCOL_VERSION {
+        error!(
+            "client: server rejected: {:?}",
+            ack.reason.as_ref().map(|s| s.as_str()).unwrap_or("unknown")
+        );
         return Err(anyhow!(
             "server rejected: {:?}",
             ack.reason.unwrap_or_else(|| "unknown".into())
         ));
     }
+    info!("client: HelloAck accepted");
 
     /*
      * サーバからの全件受信フェーズ
      */
+    info!("client: receive phase start");
     let mut send_candidates: HashSet<String> = HashSet::new();
     let mut remaining_local: HashSet<String> = writer
         .all_service()?
         .into_iter()
         .map(|id| id.to_string())
         .collect();
+    let mut received = 0u64;
 
     loop {
         match recv_packet(&mut stream)? {
@@ -80,17 +95,34 @@ pub(super) fn run(
                     EntryDecision::AdoptRemote => {
                         writer.put(&entry)?;
                         send_ack(&mut stream, &entry_id, true, None)?;
+                        debug!(
+                            "client: adopt remote entry id={}, service={}",
+                            entry.id(),
+                            entry.service()
+                        );
                     }
                     EntryDecision::KeepLocal => {
                         send_candidates.insert(entry_id.clone());
                         send_ack(&mut stream, &entry_id, true, None)?;
+                        debug!(
+                            "client: keep local entry id={}, service={}",
+                            entry.id(),
+                            entry.service()
+                        );
                     }
                     EntryDecision::Abort(msg) => {
                         send_ack(&mut stream, &entry_id, false, Some(msg.clone()))?;
                         send_packet(&mut stream, SyncPacket::abort(msg),)?;
+                        error!(
+                            "client: abort on conflict id={}, service={}",
+                            entry.id(),
+                            entry.service()
+                        );
                         return Err(anyhow!("aborted by user"));
                     }
                 }
+
+                received += 1;
             }
 
             SyncPacket::ServerEntriesEnd(_end) => {
@@ -104,6 +136,7 @@ pub(super) fn run(
             other => return Err(anyhow!("unexpected packet: {:?}", other)),
         }
     }
+    info!("client: receive phase end ({} entries)", received);
 
     /*
      * クライアント側の差分送信フェーズ
@@ -114,6 +147,7 @@ pub(super) fn run(
     }
 
     let mut sent = 0u64;
+    info!("client: send phase start ({} candidates)", send_candidates.len());
     for id_str in send_candidates {
         let entry = {
             let id = ServiceId::from_string(&id_str)?;
@@ -129,11 +163,14 @@ pub(super) fn run(
                 if !ack.accepted {
                     let reason = ack.reason.unwrap_or_else(|| "rejected".into());
                     send_packet(&mut stream, SyncPacket::abort(reason.clone()))?;
+                    error!("client: server rejected entry id={}", ack.entry_id);
                     return Err(anyhow!("server rejected entry: {}", reason));
                 }
+                debug!("client: entry ack id={}", ack.entry_id);
             }
 
             SyncPacket::Abort(abort) => {
+                error!("client: server aborted during send: {}", abort.reason);
                 return Err(anyhow!("server aborted: {}", abort.reason));
             }
 
@@ -142,13 +179,20 @@ pub(super) fn run(
     }
 
     send_packet(&mut stream, SyncPacket::client_entries_end(sent))?;
+    info!("client: send phase end ({} entries)", sent);
 
     /*
      * 終了待ち
      */
     match recv_packet(&mut stream)? {
-        SyncPacket::Finished => Ok(()),
-        SyncPacket::Abort(abort) => Err(anyhow!("server aborted: {}", abort.reason)),
+        SyncPacket::Finished => {
+            info!("client: sync finished");
+            Ok(())
+        }
+        SyncPacket::Abort(abort) => {
+            error!("client: server aborted: {}", abort.reason);
+            Err(anyhow!("server aborted: {}", abort.reason))
+        }
         other => Err(anyhow!("unexpected packet: {:?}", other)),
     }
 }

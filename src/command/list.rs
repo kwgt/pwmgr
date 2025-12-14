@@ -13,8 +13,8 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 
-use crate::cmd_args::{Options, ListOpts};
-use crate::database::{EntryManager, TransactionReader, TransactionReadable};
+use crate::cmd_args::{ListOpts, Options, SortMode};
+use crate::database::{EntryManager, TransactionReadable, TransactionReader};
 use crate::database::types::ServiceId;
 use super::CommandContext;
 
@@ -31,14 +31,11 @@ struct ListCommandContext {
     /// タグをAND条件で解釈するか
     tag_and: bool,
 
-    /// サービス名でソートするか
-    sort_by_service_name: bool,
+    /// ソートモード
+    sort_mode: SortMode,
 
     /// ソートを逆順にするか
     reverse_sort: bool,
-
-    /// 最終更新日時でソートするか
-    sort_by_last_update: bool,
 
     /// 削除済みエントリも含めるか
     with_removed: bool,
@@ -53,9 +50,8 @@ impl ListCommandContext {
             manager: RefCell::new(opts.open()?),
             target_tags: sub_opts.target_tags(),
             tag_and: sub_opts.is_tag_and(),
-            sort_by_service_name: sub_opts.sort_by_service_name(),
+            sort_mode: sub_opts.sort_mode(),
             reverse_sort: sub_opts.reverse_sort(),
-            sort_by_last_update: sub_opts.sort_by_last_update(),
             with_removed: sub_opts.with_removed(),
         })
     }
@@ -131,60 +127,82 @@ impl CommandContext for ListCommandContext {
             let mut ids = self.collect_ids_with_reader(reader)?;
             ids.sort();
 
-            if self.sort_by_last_update {
-                let mut items = Vec::new();
-                for id in ids {
-                    if let Some(entry) = reader.get(&id)? {
-                        items.push((
-                            entry.last_update(),
-                            entry.service(),
-                            id,
-                            entry.is_removed()
-                        ));
+            match self.sort_mode {
+                SortMode::LastUpdate => {
+                    let mut items = Vec::new();
+                    for id in ids {
+                        if let Some(entry) = reader.get(&id)? {
+                            items.push((
+                                entry.last_update(),
+                                entry.service(),
+                                id,
+                                entry.is_removed()
+                            ));
+                        }
+                    }
+                    items.sort_by(|a, b| {
+                        let a_key = (a.0.is_none(), a.0.clone());
+                        let b_key = (b.0.is_none(), b.0.clone());
+
+                        a_key
+                            .cmp(&b_key)
+                            .then_with(|| {
+                                a.1.to_lowercase().cmp(&b.1.to_lowercase())
+                            })
+                            .then_with(|| {
+                                a.2.cmp(&b.2)
+                            })
+                    });
+                    if self.reverse_sort {
+                        items.reverse();
+                    }
+                    for (last, service, id, removed) in items {
+                        let stamp = last
+                            .map(|dt| dt.to_rfc3339())
+                            .unwrap_or_else(|| "-".to_string());
+                        let prefix = if removed { "-" } else { "" };
+                        println!("{}{} {}\t{}", prefix, id, stamp, service);
                     }
                 }
-                items.sort_by(|a, b| a.0.cmp(&b.0));
-                if self.reverse_sort {
-                    items.reverse();
-                }
-                for (last, service, id, removed) in items {
-                    let stamp = last
-                        .map(|dt| dt.to_rfc3339())
-                        .unwrap_or_else(|| "-".to_string());
-                    let prefix = if removed { "-" } else { "" };
-                    println!("{}{}\t{}\t{}", prefix, id, service, stamp);
-                }
-            } else if self.sort_by_service_name {
-                let mut items = Vec::new();
-                for id in ids {
-                    if let Some(entry) = reader.get(&id)? {
-                        items.push((entry.service(), id, entry.is_removed()));
+                SortMode::ServiceName => {
+                    let mut items = Vec::new();
+                    for id in ids {
+                        if let Some(entry) = reader.get(&id)? {
+                            items.push((
+                                entry.service(),
+                                id,
+                                entry.is_removed()
+                            ));
+                        }
+                    }
+
+                    items.sort_by(|a, b| {
+                        a.0.to_lowercase()
+                            .cmp(&b.0.to_lowercase())
+                            .then_with(|| a.1.cmp(&b.1))
+                    });
+
+                    if self.reverse_sort {
+                        items.reverse();
+                    }
+                    for (service, id, removed) in items {
+                        let prefix = if removed { "-" } else { "" };
+                        println!("{}{}\t{}", prefix, id, service);
                     }
                 }
-
-                items.sort_by(|a, b| {
-                    a.0.to_lowercase().cmp(&b.0.to_lowercase())
-                });
-
-                if self.reverse_sort {
-                    items.reverse();
-                }
-                for (service, id, removed) in items {
-                    let prefix = if removed { "-" } else { "" };
-                    println!("{}{}\t{}", prefix, id, service);
-                }
-            } else {
-                if self.reverse_sort {
-                    ids.reverse();
-                }
-                for id in ids {
-                    if let Some(entry) = reader.get(&id)? {
-                        println!(
-                            "{}{}\t{}",
-                            id,
-                            if entry.is_removed() { "!" } else { "" },
-                            entry.service()
-                        );
+                SortMode::Default => {
+                    if self.reverse_sort {
+                        ids.reverse();
+                    }
+                    for id in ids {
+                        if let Some(entry) = reader.get(&id)? {
+                            println!(
+                                "{}{}\t{}",
+                                id,
+                                if entry.is_removed() { "!" } else { "" },
+                                entry.service()
+                            );
+                        }
                     }
                 }
             }
@@ -264,9 +282,8 @@ mod tests {
             manager: RefCell::new(mgr),
             target_tags: vec!["tAg1".into()],
             tag_and: false,
-            sort_by_service_name: false,
+            sort_mode: SortMode::Default,
             reverse_sort: false,
-            sort_by_last_update: false,
             with_removed: false,
         };
 
@@ -282,9 +299,8 @@ mod tests {
             manager: RefCell::new(mgr),
             target_tags: vec![],
             tag_and: false,
-            sort_by_service_name: true,
+            sort_mode: SortMode::ServiceName,
             reverse_sort: true,
-            sort_by_last_update: false,
             with_removed: false,
         };
 

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 
-use crate::cmd_args::{Options, TagsOpts};
+use crate::cmd_args::{Options, TagsOpts, TagsSortMode};
 use crate::command::matcher::Matcher;
 use crate::database::{EntryManager, TransactionReadable, TransactionReader};
 use super::CommandContext;
@@ -87,10 +87,13 @@ impl TagsCommandContext {
     /// オプションに従ってソート
     ///
     fn sort(&self, mut tags: Vec<TagInfo>) -> Vec<TagInfo> {
-        if self.opts.sort_by_number() {
-            tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.tag.cmp(&b.tag)));
-        } else {
-            tags.sort_by(|a, b| a.tag.cmp(&b.tag));
+        match self.opts.sort_mode() {
+            TagsSortMode::NumberOfRegist => tags.sort_by(|a, b| {
+                b.count
+                    .cmp(&a.count)
+                    .then_with(|| a.tag.cmp(&b.tag))
+            }),
+            TagsSortMode::Default => tags.sort_by(|a, b| a.tag.cmp(&b.tag)),
         }
 
         if self.opts.reverse_sort() {
