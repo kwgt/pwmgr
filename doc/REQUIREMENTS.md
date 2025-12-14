@@ -70,6 +70,8 @@ pwmgr [OPTIONS] <SUB-COMMAND> [COMMAND-OPTIONS]
 | オプション | 意味 | デフォルト値
 |:--|:--|:--
 | `-c`, `--config PATH`   | デフォルト設定ファイルのパスを指定する | %LOCALAPPDATA%\pwmgr\config.toml (windows)<br>~/.config/pwmgr/config.toml (linux, macos)
+| `-l`, `--log-level LEVEL` | ログレベルを指定する | "info"
+| `-L`, `--log-output PATH` | ログの出力先を指定する | LOCALAPPDATA%\pwmgr\log\ (windows)<br>~/.local/share/pwmgr/log/ (linux, macos)  
 | `-d`, `--db-path PATH`  | データベースファイルのパスを設定する   | %LOCALAPPDATA%\pwmgr\database.redb (windows)<br>~/.local/share/pwmgr/database.redb (linux, macos)
 | `-e`, `--editor EDITOR` | 編集で使用するテキストエディタの名前を指定する | notepad (windows)<br>nano (linux, macos)
 | `--json-output`         | 出力をJSON形式にする
@@ -77,6 +79,17 @@ pwmgr [OPTIONS] <SUB-COMMAND> [COMMAND-OPTIONS]
 | `--save-default`        | config.tomlへのデフォルト値の書き込み指示
 | `-h`, `--help`          | ヘルプメッセージの表示
 | `-v`, `--version`       | プログラムのバージョン番号の表示
+
+`--log-level`オプションの`<LEVEL>`には以下の値が設定可能。
+
+  - off : ログを記録しない
+  - error : エラーの場合のみを記録
+  - warn : 警告以上の場合を記録
+  - info : 一般情報レベルを記録
+  - debug : デバッグ用メッセージも記録
+  - trace : トレース情報も記録
+
+`--log-output`にはログの出力先を指定できるが、ファイルのパスを指定した場合は単一ファイルへの出力となり、ディレクトリパスを指定した場合はログローテション付きで10本のファイルに自動切り替えを行いながら記録を行う(一本あたりのサイズ制限は2Mバイト)。
 
 `--db-path`および`--editor`についてはconfig.tomlでデフォルト値を設定することができる。
 また`--editor`については環境変数EDITORでも設定することができる。設定の優先度は コマンドラインオプション &gt; config.toml &gt; 環境変数となる。
@@ -376,6 +389,8 @@ pwmgr sync --client <CONNECT-ADDR[:PORT]>
 
 | キー | 設定内容 | 対応オプション |デフォルト値
 |:--|:--|:--
+| `log_level` | ログレベル | `--log-level` | "info"
+| `log_output` | ログの出力先 | `--log-output` | `$XDG_DATA_HOME/log`
 | `db_path` | データベースファイルのパス | `--db-path` | `$XDG_DATA_HOME/database.redb`
 | `editor`  | 使用するエディタの名称     | `--editor`  | OSによって異なる
 

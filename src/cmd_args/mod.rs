@@ -9,6 +9,7 @@
 //!
 
 mod config;
+mod logger;
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -85,6 +86,72 @@ fn default_db_path() -> PathBuf {
 }
 
 ///
+/// デフォルトのログ出力先のパスを生成
+///
+/// # 戻り値
+/// ログ出力先ディレクトリのパス情報
+///
+fn default_log_path() -> PathBuf {
+    DEFAULT_DATA_PATH.join("log")
+}
+
+///
+/// ログレベルを指し示す列挙子
+///
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum, Deserialize, Serialize)]
+#[clap(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "UPPERCASE")]
+enum LogLevel {
+    /// ログを記録しない
+    #[serde(alias = "off", alias = "OFF")]
+    #[value(alias = "off")]
+    None,
+
+    /// エラー情報以上のレベルを記録
+    Error,
+
+    /// 警告情報以上のレベルを記録
+    Warn,
+
+    /// 一般情報以上のレベルを記録
+    Info,
+
+    /// デバッグ情報以上のレベルを記録
+    Debug,
+
+    /// トレース情報以上のレベルを記録
+    Trace,
+}
+
+// Intoトレイトの実装
+impl Into<log::LevelFilter> for LogLevel {
+    fn into(self) -> log::LevelFilter {
+        match self {
+            Self::None => log::LevelFilter::Off,
+            Self::Error => log::LevelFilter::Error,
+            Self::Warn => log::LevelFilter::Warn,
+            Self::Info => log::LevelFilter::Info,
+            Self::Debug => log::LevelFilter::Debug,
+            Self::Trace => log::LevelFilter::Trace,
+        }
+    }
+}
+
+// AsRefトレイトの実装
+impl AsRef<str> for LogLevel {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::None => "off",
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+///
 /// グローバルオプション情報を格納する構造体
 ///
 #[derive(Parser, Debug, Clone)]
@@ -100,6 +167,15 @@ pub struct Options {
     /// config.tomlを使用する場合のパス
     #[arg(short = 'c', long = "config")]
     config_path: Option<PathBuf>,
+
+    /// 記録するログレベルの指定
+    #[arg(short = 'l', long = "log-level", value_name = "LEVEL",
+        ignore_case = true)]
+    log_level: Option<LogLevel>,
+
+    /// ログの出力先の指定
+    #[arg(short = 'L', long = "log-output", value_name = "PATH")]
+    log_output: Option<PathBuf>,
 
     /// データベースファイルのパス
     #[arg(short = 'd', long = "db-path")]
@@ -127,6 +203,34 @@ pub struct Options {
 }
 
 impl Options {
+    ///
+    /// ログレベルへのアクセサ
+    ///
+    /// # 戻り値
+    /// 設定されたログレベルを返す
+    fn log_level(&self) -> LogLevel {
+        if let Some(level) = self.log_level {
+            level
+        } else {
+            LogLevel::Info
+        }
+    }
+
+    ///
+    /// ログの出力先へのアクセサ
+    ///
+    /// # 戻り値
+    /// ログの出力先として設定されたパス情報を返す。未設定の場合はデフォルトの
+    /// パスを返す。
+    ///
+    fn log_output(&self) -> PathBuf {
+        if let Some(path) = &self.log_output {
+            path.clone()
+        } else {
+            default_log_path()
+        }
+    }
+
     ///
     /// データベースパスへのアクセサ
     ///
@@ -230,6 +334,18 @@ impl Options {
                     }
                 }
 
+                if self.log_level.is_none() {
+                    if let Some(level) = config.log_level() {
+                        self.log_level = Some(level);
+                    }
+                }
+
+                if self.log_output.is_none() {
+                    if let Some(path) = &config.log_output() {
+                        self.log_output = Some(path.clone());
+                    }
+                }
+
                 if self.editor.is_none() {
                     if let Some(editor) = &config.editor() {
                         self.editor = Some(editor.clone());
@@ -308,6 +424,8 @@ impl Options {
         println!("global options");
         println!("   config path:   {}", config_path);
         println!("   database path: {}", self.db_path().display());
+        println!("   log level:     {}", self.log_level().as_ref());
+        println!("   log output:    {}", self.log_output().display());
         println!("   editor:        {}", self.editor());
 
         // サブコマンドが指定されており、そのサブコマンドがオプションを持つなら
@@ -1433,6 +1551,11 @@ pub(crate) fn parse() -> Result<Arc<Options>> {
      * 設定情報のバリデーション
      */
     opts.validate()?;
+
+    /*
+     * ログ機能の初期化
+     */
+    logger::init(&opts)?;
 
     /*
      * 設定情報の表示

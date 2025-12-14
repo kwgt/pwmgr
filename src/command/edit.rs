@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use log::info;
 use serde_yaml_ng;
 
 use crate::cmd_args::{EditOpts, Options};
@@ -146,6 +147,7 @@ impl CommandContext for EditCommandContext {
             entry_norm.set_last_update_now();
 
             self.manager.borrow_mut().put(&entry_norm)?;
+            info!("edit: id={}, service={}", id, entry_norm.service());
             break;
         }
 

@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-use super::default_db_path;
-use super::{MatchMode, DEFAULT_EDITOR};
+use super::{default_db_path, default_log_path};
+use super::{LogLevel, MatchMode, DEFAULT_EDITOR};
 
 ///
 /// コンフィギュレーションデータを集約する構造体
@@ -50,6 +50,25 @@ impl Config {
         self.global
             .as_ref()
             .and_then(|global| global.db_path.as_ref())
+            .cloned()
+    }
+
+    ///
+    /// ログレベルへのアクセサ
+    ///
+    pub(super) fn log_level(&self) -> Option<LogLevel> {
+        self.global
+            .as_ref()
+            .and_then(|global| global.log_level)
+    }
+
+    ///
+    /// ログ出力先へのアクセサ
+    ///
+    pub(super) fn log_output(&self) -> Option<PathBuf> {
+        self.global
+            .as_ref()
+            .and_then(|global| global.log_output.as_ref())
             .cloned()
     }
 
@@ -184,6 +203,8 @@ impl Default for Config {
         Self {
             global: Some(GlobalInfo {
                 db_path: Some(default_db_path()),
+                log_level: Some(LogLevel::Info),
+                log_output: Some(default_log_path()),
                 editor: Some(DEFAULT_EDITOR.to_string()),
             }),
             query: Some(QueryInfo {
@@ -217,6 +238,12 @@ impl Default for Config {
 struct GlobalInfo {
     /// データベースファイルへのパス
     db_path: Option<PathBuf>,
+
+    /// ログレベル
+    log_level: Option<LogLevel>,
+
+    /// ログの出力先
+    log_output: Option<PathBuf>,
 
     /// 使用するエディタ
     editor: Option<String>,
@@ -324,13 +351,15 @@ pub(super) enum TagsSortMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::{default_db_path, DEFAULT_EDITOR};
+    use super::super::{default_db_path, default_log_path, LogLevel, DEFAULT_EDITOR};
 
     #[test]
     fn default_config_values() {
         let config = Config::default();
 
         assert_eq!(config.db_path(), Some(default_db_path()));
+        assert_eq!(config.log_level(), Some(LogLevel::Info));
+        assert_eq!(config.log_output(), Some(default_log_path()));
         assert_eq!(config.editor(), Some(DEFAULT_EDITOR.to_string()));
 
         assert_eq!(
@@ -373,6 +402,8 @@ mod tests {
         let toml = r#"
 [global]
 db_path = "./db.redb"
+log_level = "off"
+log_output = "./logs"
 editor = "vim"
 
 [query]
@@ -402,6 +433,8 @@ match_mode = "fuzzy"
             config.db_path(),
             Some(PathBuf::from("./db.redb"))
         );
+        assert_eq!(config.log_level(), Some(LogLevel::None));
+        assert_eq!(config.log_output(), Some(PathBuf::from("./logs")));
         assert_eq!(config.editor(), Some("vim".to_string()));
 
         assert_eq!(

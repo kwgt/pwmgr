@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use log::info;
 
 use crate::cmd_args::{AddOpts, Options};
 use crate::database::{
@@ -183,6 +184,7 @@ impl CommandContext for AddCommandContext {
             entry.set_last_update_now();
 
             self.manager.borrow_mut().put(&entry)?;
+            info!("add: id={}, service={}", entry.id(), entry.service());
             break;
         }
 

@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 
 use anyhow::{anyhow, Result};
+use log::info;
 
 use crate::cmd_args::{Options, RemoveOpts};
 use crate::database::EntryManager;
@@ -50,13 +51,17 @@ impl CommandContext for RemoveCommandContext {
         if self.hard {
             self.manager.borrow_mut().remove(&id)?;
             println!("removed (hard): {}", id);
+            info!("remove (hard): id={}", id);
         } else {
             let mut mgr = self.manager.borrow_mut();
             if let Some(mut entry) = mgr.get(&id)? {
+                let service = entry.service();
+
                 entry.set_removed(true);
                 entry.set_last_update_now();
                 mgr.put(&entry)?;
                 println!("removed (soft): {}", id);
+                info!("remove (soft): id={}, service={}", id, service);
             } else {
                 return Err(anyhow!("指定されたIDのエントリが見つかりません: {}", id));
             }
