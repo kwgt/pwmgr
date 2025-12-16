@@ -40,7 +40,8 @@ mod serde_human_datetime {
     }
 
     /// RFC3339 文字列（または None）から Option<DateTime<Local>> を復元する
-    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Local>>, D::Error>
+    pub(crate) fn deserialize<'de, D>(deserializer: D)
+        -> Result<Option<DateTime<Local>>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -377,6 +378,17 @@ impl Entry {
     pub(crate) fn set_removed(&mut self, removed: bool) {
         self.removed = removed.then_some(true);
     }
+
+    ///
+    /// 秘匿項目をマスク表示用に上書きする
+    ///
+    pub(crate) fn mask_secret_properties(&mut self) {
+        for (key, value) in self.properties.iter_mut() {
+            if key.ends_with('!') {
+                *value = "<< SECRET >>".to_string();
+            }
+        }
+    }
 }
 
 // Valueトレイトの実装
@@ -475,6 +487,34 @@ mod tests {
         assert_eq!(entry.aliases(), vec!["a".to_string()]);
         assert_eq!(entry.tags(), vec!["tag".to_string()]);
         assert_eq!(entry.properties(), props);
+    }
+
+    ///
+    /// mask_secret_properties が秘匿項目の値を隠蔽することを確認
+    ///
+    #[test]
+    fn entry_mask_secret_properties_masks_values() {
+        let id = ServiceId::new();
+        let mut props = BTreeMap::new();
+        props.insert("user".to_string(), "alice".to_string());
+        props.insert("password!".to_string(), "secret".to_string());
+
+        let mut entry = Entry::new(
+            id.clone(),
+            "svc".to_string(),
+            vec!["a".into()],
+            vec!["tag".into()],
+            props,
+        );
+
+        entry.mask_secret_properties();
+
+        let properties = entry.properties();
+        assert_eq!(properties.get("user"), Some(&"alice".to_string()));
+        assert_eq!(
+            properties.get("password!"),
+            Some(&"<< SECRET >>".to_string()
+        ));
     }
 
     ///

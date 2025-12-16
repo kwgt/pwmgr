@@ -95,6 +95,15 @@ impl Config {
     }
 
     ///
+    /// queryサブコマンドのマスク表示フラグへのアクセサ
+    ///
+    pub(super) fn query_masked_mode(&self) -> Option<bool> {
+        self.query
+            .as_ref()
+            .and_then(|query| query.masked_mode)
+    }
+
+    ///
     /// searchサブコマンドでサービス名を検索対象に含めるかのアクセサ
     ///
     pub(super) fn search_with_service_name(&self) -> Option<bool> {
@@ -225,6 +234,7 @@ impl Default for Config {
             }),
             query: Some(QueryInfo {
                 match_mode: Some(MatchMode::Contains),
+                masked_mode: Some(false),
             }),
             search: Some(SearchInfo {
                 with_service_name: Some(false),
@@ -284,6 +294,9 @@ where
 struct QueryInfo {
     /// マッチモード
     match_mode: Option<MatchMode>,
+
+    /// 秘匿項目をマスク表示するか否か
+    masked_mode: Option<bool>,
 }
 
 ///
@@ -361,6 +374,7 @@ mod tests {
             config.query_match_mode(),
             Some(MatchMode::Contains)
         );
+        assert_eq!(config.query_masked_mode(), Some(false));
 
         assert_eq!(
             config.search_with_service_name(),
@@ -408,6 +422,7 @@ editor = "vim"
 
 [query]
 match_mode = "regex"
+masked_mode = true
 
 [search]
 with_service_name = true
@@ -443,6 +458,7 @@ match_mode = "fuzzy"
             config.query_match_mode(),
             Some(MatchMode::Regex)
         );
+        assert_eq!(config.query_masked_mode(), Some(true));
 
         assert_eq!(
             config.search_with_service_name(),

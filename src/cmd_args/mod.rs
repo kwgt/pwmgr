@@ -23,7 +23,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::command::{
-    add, edit, export, import, list, query, remove, search, sync, tags, CommandContext
+    add, edit, export, import, list, query, remove, search, sync, tags,
+    CommandContext
 };
 use crate::database::EntryManager;
 use config::Config;
@@ -405,6 +406,7 @@ impl Options {
 
         if let Some(command) = &mut self.command {
             let opts: Option<&mut dyn Validate> = match command {
+                Command::Query(opts) => Some(opts),
                 Command::Search(opts) => Some(opts),
                 Command::Import(opts) => Some(opts),
                 Command::Sync(opts) => Some(opts),
@@ -595,6 +597,14 @@ pub(crate) struct QueryOpts {
     #[arg(short = 'f', long = "full")]
     full: bool,
 
+    /// 秘匿項目をマスクして表示
+    #[arg(short = 'M', long = "masked-mode", conflicts_with = "unmasked_mode")]
+    masked_mode: bool,
+
+    /// 秘匿項目をマスクせずに表示
+    #[arg(short = 'U', long = "unmasked-mode", conflicts_with = "masked_mode")]
+    unmasked_mode: bool,
+
     /// マッチモード
     #[arg(
         short = 'm',
@@ -604,6 +614,10 @@ pub(crate) struct QueryOpts {
         help = "マッチモード\n"
     )]
     match_mode: Option<MatchMode>,
+
+    /// マスクモードのデフォルト値(config適用後に保持)
+    #[arg(skip)]
+    default_masked: Option<bool>,
 
     /// 検索のためのキー(サービス名/過去名/ID)
     #[arg()]
@@ -629,6 +643,19 @@ impl QueryOpts {
     }
 
     ///
+    /// 秘匿項目をマスクするか否か
+    ///
+    pub(crate) fn is_masked(&self) -> bool {
+        if self.masked_mode {
+            true
+        } else if self.unmasked_mode {
+            false
+        } else {
+            self.default_masked.unwrap_or(false)
+        }
+    }
+
+    ///
     /// 全てのプロパティを出力するか否かのフラグ
     ///
     pub(crate) fn is_full(&self) -> bool {
@@ -647,9 +674,48 @@ impl QueryOpts {
     ) -> Self {
         Self {
             full,
+            masked_mode: false,
+            unmasked_mode: false,
             match_mode: Some(match_mode),
+            default_masked: None,
             key: key.into(),
         }
+    }
+
+    ///
+    /// テスト用のコンストラクタ（マスク指定付き）
+    ///
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn new_for_test_with_mask(
+        full: bool,
+        match_mode: MatchMode,
+        key: impl Into<String>,
+        masked_mode: bool,
+        unmasked_mode: bool,
+        default_masked: Option<bool>,
+    ) -> Self {
+        Self {
+            full,
+            masked_mode,
+            unmasked_mode,
+            match_mode: Some(match_mode),
+            default_masked,
+            key: key.into(),
+        }
+    }
+}
+
+// Validateトレイトの実装
+impl Validate for QueryOpts {
+    fn validate(&mut self) -> Result<()> {
+        if self.masked_mode && self.unmasked_mode {
+            return Err(anyhow!(
+                "--masked-mode と --unmasked-mode は同時に指定できません"
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -662,6 +728,9 @@ impl ApplyConfig for QueryOpts {
             }
         }
 
+        if self.default_masked.is_none() {
+            self.default_masked = config.query_masked_mode();
+        }
     }
 }
 
@@ -671,6 +740,7 @@ impl ShowOptions for QueryOpts {
         println!("query command options");
         println!("   key:   {}", self.key());
         println!("   mode:  {:?}", self.match_mode());
+        println!("   mask:  {}", self.is_masked());
     }
 }
 
@@ -1572,6 +1642,20 @@ reverse_sort = true
         assert_eq!(opts.sort_mode(), TagsSortMode::NumberOfRegist);
         assert!(opts.reverse_sort());
         assert_eq!(opts.match_mode(), MatchMode::Exact);
+    }
+
+    #[test]
+    fn query_validate_rejects_conflicting_mask_flags() {
+        let mut opts = QueryOpts::new_for_test_with_mask(
+            true,
+            MatchMode::Exact,
+            "dummy",
+            true,
+            true,
+            None,
+        );
+
+        assert!(opts.validate().is_err());
     }
 
     #[test]

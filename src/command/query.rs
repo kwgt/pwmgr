@@ -169,6 +169,12 @@ impl CommandContext for QueryCommandContext {
             return Err(anyhow!("該当するエントリが見つかりませんでした"));
         }
 
+        if self.opts.is_masked() {
+            for entry in hits.iter_mut() {
+                entry.mask_secret_properties();
+            }
+        }
+
         if self.json_output {
             let display: Vec<DisplayEntry> = hits.iter()
                 .map(Self::to_display_entry)
@@ -238,7 +244,10 @@ mod tests {
             "Alpha".to_string(),
             vec!["alp".into()],
             vec!["t1".into()],
-            BTreeMap::from([("user".into(), "alice".into())]),
+            BTreeMap::from([
+                ("user".into(), "alice".into()),
+                ("password!".into(), "secret123".into()),
+            ]),
         );
 
         // service: "Beta", aliases: ["bta"], typo-friendly
@@ -257,8 +266,22 @@ mod tests {
         mgr
     }
 
-    fn build_ctx(mode: MatchMode, key: &str, json: bool) -> QueryCommandContext {
-        let opts = QueryOpts::new_for_test(true, mode, key.to_string());
+    fn build_ctx(
+        mode: MatchMode,
+        key: &str,
+        json: bool,
+        masked_mode: bool,
+        unmasked_mode: bool,
+        default_masked: Option<bool>,
+    ) -> QueryCommandContext {
+        let opts = QueryOpts::new_for_test_with_mask(
+            true,
+            mode,
+            key.to_string(),
+            masked_mode,
+            unmasked_mode,
+            default_masked,
+        );
         QueryCommandContext {
             manager: RefCell::new(build_mgr_with_entries()),
             opts,
@@ -271,7 +294,7 @@ mod tests {
     ///
     #[test]
     fn search_contains_hits_alias() {
-        let ctx = build_ctx(MatchMode::Contains, "alp", false);
+        let ctx = build_ctx(MatchMode::Contains, "alp", false, false, false, None);
         let matcher = Matcher::new(
             ctx.opts.match_mode(),
             ctx.opts.key()
@@ -287,7 +310,7 @@ mod tests {
     #[test]
     fn search_exact_requires_full_match() {
         // 大文字小文字は無視して完全一致する
-        let ctx = build_ctx(MatchMode::Exact, "ALPHA", false);
+        let ctx = build_ctx(MatchMode::Exact, "ALPHA", false, false, false, None);
         let matcher = Matcher::new(
             ctx.opts.match_mode(),
             ctx.opts.key()
@@ -297,7 +320,7 @@ mod tests {
         assert_eq!(hits.len(), 1);
 
         // 部分一致やタイプミスはヒットしない
-        let ctx_no_hit = build_ctx(MatchMode::Exact, "alp", false);
+        let ctx_no_hit = build_ctx(MatchMode::Exact, "alp", false, false, false, None);
         let matcher = Matcher::new(
             ctx_no_hit.opts.match_mode(),
             ctx_no_hit.opts.key()
@@ -308,11 +331,80 @@ mod tests {
     }
 
     ///
+    /// マスクモードでは秘匿項目の値が置き換えられることを確認
+    ///
+    #[test]
+    fn masked_mode_masks_secret_properties() {
+        let ctx = build_ctx(
+            MatchMode::Exact,
+            "Alpha",
+            false,
+            true,
+            false,
+            None,
+        );
+
+        let matcher = Matcher::new(
+            ctx.opts.match_mode(),
+            ctx.opts.key()
+        ).unwrap();
+        let mut hits = ctx.search_by_string(&matcher).unwrap();
+        assert_eq!(hits.len(), 1);
+
+        if ctx.opts.is_masked() {
+            for entry in hits.iter_mut() {
+                entry.mask_secret_properties();
+            }
+        }
+
+        let props = hits[0].properties();
+        assert_eq!(props.get("password!"), Some(&"<< SECRET >>".to_string()));
+    }
+
+    ///
+    /// アンマスク指定時は秘匿項目の値がそのまま表示用に残ることを確認
+    ///
+    #[test]
+    fn unmasked_mode_keeps_secret_properties() {
+        let ctx = build_ctx(
+            MatchMode::Exact,
+            "Alpha",
+            false,
+            false,
+            true,
+            None,
+        );
+
+        let matcher = Matcher::new(
+            ctx.opts.match_mode(),
+            ctx.opts.key()
+        ).unwrap();
+        let mut hits = ctx.search_by_string(&matcher).unwrap();
+        assert_eq!(hits.len(), 1);
+
+        if ctx.opts.is_masked() {
+            for entry in hits.iter_mut() {
+                entry.mask_secret_properties();
+            }
+        }
+
+        let props = hits[0].properties();
+        assert_eq!(props.get("password!"), Some(&"secret123".to_string()));
+    }
+
+    ///
     /// 正規表現モードでサービス名にマッチすることを確認
     ///
     #[test]
     fn search_regex_hits() {
-        let ctx = build_ctx(MatchMode::Regex, "^Be.*$", false);
+        let ctx = build_ctx(
+            MatchMode::Regex,
+            "^Be.*$",
+            false,
+            false,
+            false,
+            None,
+        );
         let matcher = Matcher::new(
             ctx.opts.match_mode(),
             ctx.opts.key()
@@ -328,7 +420,14 @@ mod tests {
     #[test]
     fn search_fuzzy_hits_typo() {
         // "Btea" should fuzzy-match "Beta" with jaro-winkler >= 0.85
-        let ctx = build_ctx(MatchMode::Fuzzy, "Btea", false);
+        let ctx = build_ctx(
+            MatchMode::Fuzzy,
+            "Btea",
+            false,
+            false,
+            false,
+            None,
+        );
         let matcher = Matcher::new(
             ctx.opts.match_mode(),
             ctx.opts.key()
