@@ -214,7 +214,9 @@ where
     }
 
     let path = std::fs::canonicalize(path)?;
-    let path = FileSpec::try_from(path.join("log"))?.suffix("txt");
+    let path = FileSpec::try_from(path.join("log"))?
+        .suffix("txt")
+        .suppress_timestamp();
 
     Logger::try_with_env_or_str(level)?
         .log_to_file(path)
@@ -227,10 +229,7 @@ where
         .append()
         .rotate(
             Criterion::Size(MAX_LOG_SIZE),
-            Naming::TimestampsCustomFormat {
-                current_infix: None,
-                format: "%Y%m%d-%H%M%S"
-            },
+            Naming::Numbers,
             Cleanup::KeepLogFiles(MAX_LOG_FILES),
         )
         .write_mode(WriteMode::Direct)
